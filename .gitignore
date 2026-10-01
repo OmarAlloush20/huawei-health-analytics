@@ -3,8 +3,15 @@
 # dependencies
 node_modules/
 
+# Private project continuity notes (never commit)
+/docs/internal/
+
 # Expo
 .expo/
+analytics.settings
+.android-user/
+.gradle-user/
+.g/
 dist/
 web-build/
 expo-env.d.ts
@@ -30,11 +37,39 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Huawei/AppGallery credentials and generated service configuration
+agconnect-services.json
+**/agconnect-services.json
+*.keystore
+*.jks
+*.p8
+*.p12
+*.key
+*.pem
+
+# Personal health data and debug exports
+/data/
+/exports/
+*.health.json
+*.health.csv
+*.health.zip
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 
 # typescript
 *.tsbuildinfo
+
+# test reports and caches
+coverage/
+.jest-cache/
 
 # generated native folders
 /ios
