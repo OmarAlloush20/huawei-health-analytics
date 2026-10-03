@@ -11,6 +11,8 @@ describe('Trends view model', () => {
     expect(model.cards.map((card) => card.metric)).toEqual(['recovery', 'sleep-duration', 'hrv-rmssd', 'resting-heart-rate', 'steps']);
     expect(model.cards.every((card) => card.coverage.match(/\d+ of 7 days available/))).toBe(true);
     expect(model.cards.find((card) => card.metric === 'hrv-rmssd')?.points.some((point) => point.status !== 'available')).toBe(true);
+    expect(model.cards.find((card) => card.metric === 'recovery')).toMatchObject({ latest: expect.any(String), latestDate: expect.any(String) });
+    expect(model.cards.find((card) => card.metric === 'hrv-rmssd')?.baseline).toMatch(/–|Not available/);
   });
 
   test('uses calm insufficient-comparison copy for a 90-day range without previous history', () => {

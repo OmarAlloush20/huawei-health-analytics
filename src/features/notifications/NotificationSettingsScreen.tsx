@@ -1,66 +1,91 @@
+import { getLocale, tr } from '../../localization/i18n';
+import { Text, View, Pressable } from '../../localization/LocalizedNative';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
+import Constants from 'expo-constants';
+import { router, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  AppState,
-  Linking,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  useColorScheme,
-  View,
-} from 'react-native';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, AppState, Linking, Platform, ScrollView, StyleSheet, Switch, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { appDependencies } from '../../appDependencies';
+import { AppIcon, type AppIconName } from '../../components/AppIcon';
+import { CompactState, ProductSheet, SectionLabel } from '../../components/ProductUI';
+import type { StoredHealthStats } from '../../database/types';
 import type { DailyReminderTime, NotificationPermissionState, NotificationSettingsSnapshot } from '../../models/notifications';
+import type { ThemeMode } from '../../repositories/AppearancePreferencesRepository';
 import { formatReminderTime } from '../../services/notificationPolicy';
+import { getResponsiveLayout } from '../../theme/responsive';
 import { createTheme, type AppTheme } from '../../theme/theme';
+import { useAppTheme } from '../../theme/ThemeContext';
+import { useLocale } from '../../localization/LanguageContext';
+
+const PRIVACY_POLICY_URL = 'https://omaralloush20.github.io/huawei-health-analytics/privacy.html';
+const USER_AGREEMENT_URL = 'https://omaralloush20.github.io/huawei-health-analytics/terms.html';
+function getThemeOptions(): readonly { id: ThemeMode; label: string; detail: string }[] { return [
+  { id: 'system', label: tr('settings.system'), detail: tr('settings.systemHelp') },
+  { id: 'dark', label: tr('settings.dark'), detail: tr('settings.darkHelp') },
+  { id: 'light', label: tr('settings.light'), detail: tr('settings.lightHelp') },
+]; }
 
 export function NotificationSettingsScreen() {
-  const scheme = useColorScheme();
-  const theme = useMemo(() => createTheme(scheme !== 'light'), [scheme]);
-  const styles = useMemo(() => createStyles(theme), [theme]);
+  const { language, setLanguage } = useLocale();
+  const { theme, mode, setMode } = useAppTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const { compact, enlargedText } = getResponsiveLayout(width, fontScale);
+  const styles = useMemo(() => createStyles(theme, compact), [compact, theme]);
   const [snapshot, setSnapshot] = useState<NotificationSettingsSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [showThemePicker, setShowThemePicker] = useState(false);
+  const [showLanguagePicker, setShowLanguagePicker] = useState(false);
+  const [languageBusy, setLanguageBusy] = useState(false);
   const [showIosPicker, setShowIosPicker] = useState(false);
   const [draftTime, setDraftTime] = useState<Date | null>(null);
+  const [stats, setStats] = useState<StoredHealthStats | null>(null);
+  const [developerToolsAvailable, setDeveloperToolsAvailable] = useState(false);
+  const settingsRequest = useRef(0);
+  const mutationActive = useRef(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (duringMutation = false) => {
+    if (mutationActive.current && !duringMutation) return;
+    const request = ++settingsRequest.current;
     try {
-      const { notificationSettingsService } = await appDependencies.getPersistence();
-      setSnapshot(await notificationSettingsService.getSettings());
+      const { notificationSettingsService, dashboardService } = await appDependencies.getPersistence();
+      const [nextSnapshot, nextStats] = await Promise.all([notificationSettingsService.getSettings(), dashboardService.getStats()]);
+      if (request !== settingsRequest.current) return;
+      setSnapshot(nextSnapshot);
+      setStats(nextStats);
+      setDeveloperToolsAvailable(dashboardService.getDevelopmentScenarios() !== null);
       setError('');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Notification settings could not be loaded.');
+    } catch {
+      if (request === settingsRequest.current) setError(tr('error.settings'));
     }
   }, []);
 
-  useEffect(() => { void Promise.resolve().then(load); }, [load]);
+  useFocusEffect(useCallback(() => { void Promise.resolve().then(() => load()); }, [load]));
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void load();
-    });
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void load(); });
     return () => subscription.remove();
   }, [load]);
 
   const run = useCallback(async (task: () => Promise<NotificationSettingsSnapshot>) => {
+    if (mutationActive.current) return;
+    mutationActive.current = true;
+    const request = ++settingsRequest.current;
     setBusy(true);
     setError('');
     try {
-      setSnapshot(await task());
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The notification setting could not be saved.');
-      await load();
-    } finally {
-      setBusy(false);
+      const nextSnapshot = await task();
+      if (request === settingsRequest.current) setSnapshot(nextSnapshot);
     }
+    catch {
+      if (request === settingsRequest.current) {
+        const reloadRequest = settingsRequest.current + 1;
+        await load(true);
+        if (reloadRequest === settingsRequest.current) setError(tr('error.notification'));
+      }
+    } finally { mutationActive.current = false; setBusy(false); }
   }, [load]);
 
   const updateTime = useCallback(async (time: DailyReminderTime) => {
@@ -68,16 +93,16 @@ export function NotificationSettingsScreen() {
     return notificationSettingsService.setReminderTime(time);
   }, []);
 
+  const openExternalLink = useCallback(async (url: string) => {
+    try { await Linking.openURL(url); }
+    catch { setError(tr('error.page')); }
+  }, []);
+
   const openTimePicker = useCallback(() => {
     if (!snapshot) return;
     const value = dateForTime(snapshot.preferences.reminderTime);
     if (Platform.OS === 'android') {
-      DateTimePickerAndroid.open({
-        value,
-        mode: 'time',
-        is24Hour: true,
-        onValueChange: (_event, selected) => void run(() => updateTime({ hour: selected.getHours(), minute: selected.getMinutes() })),
-      });
+      DateTimePickerAndroid.open({ value, mode: 'time', is24Hour: true, onValueChange: (_event, selected) => void run(() => updateTime({ hour: selected.getHours(), minute: selected.getMinutes() })) });
       return;
     }
     setDraftTime(value);
@@ -88,103 +113,140 @@ export function NotificationSettingsScreen() {
   const preferences = snapshot?.preferences;
   const controlsDisabled = busy || !preferences?.enabled || permission !== 'granted';
 
-  return (
-    <SafeAreaView edges={['top']} style={styles.safeArea}>
-      <StatusBar style={theme.dark ? 'light' : 'dark'} />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.eyebrow}>LOCAL & PRIVATE</Text>
-        <Text style={styles.title}>Settings</Text>
-        <Text style={styles.subtitle}>Choose whether this device gives you one calm reminder to review your health summary.</Text>
+  const confirmDelete = useCallback(() => {
+    Alert.alert(tr('settings.deleteTitle'), tr('settings.deleteHelp'), [
+      { text: tr('common.cancel'), style: 'cancel' },
+      { text: tr('common.delete'), style: 'destructive', onPress: () => {
+        void appDependencies.getPersistence().then(async ({ repository, dashboardService }) => {
+          await repository.deleteAllLocalHealthData();
+          setStats(await dashboardService.getStats());
+        }).catch(() => setError(tr('error.delete')));
+      } },
+    ]);
+  }, []);
 
-        {!snapshot && !error ? <View style={styles.loading}><ActivityIndicator color={theme.colors.accent} /><Text style={styles.secondary}>Loading settings…</Text></View> : null}
-        {error ? <View accessibilityLiveRegion="polite" style={styles.errorCard}><Text style={styles.errorTitle}>Setting not saved</Text><Text style={styles.errorText}>{error}</Text></View> : null}
+  const rowProps = { theme, styles, compact, enlargedText };
+  // The normal-flow tab bar reserves the bottom system navigation area.
+  return <SafeAreaView edges={['top', 'left', 'right']} style={styles.safeArea}>
+    <StatusBar style={theme.dark ? 'light' : 'dark'} />
+    <ScrollView contentContainerStyle={styles.content}>
+      <View style={styles.pageHeading}><View style={styles.pageCopy}><Text style={styles.eyebrow}>{tr('settings.eyebrow')}</Text><Text accessibilityRole="header" style={styles.title}>{tr('nav.settings')}</Text></View><View style={styles.headerSymbol}><AppIcon name="settings" color={theme.colors.accent} size={23} /></View></View>
 
-        {snapshot ? (
-          <>
-            <View style={styles.card}>
-              <SettingRow
-                label="Notifications"
-                description="Allow reminders from Health Analytics on this device."
-                theme={theme}
-                control={<Switch accessibilityLabel="Notifications enabled" disabled={busy} onValueChange={(enabled) => void run(async () => {
-                  const { notificationSettingsService } = await appDependencies.getPersistence();
-                  return notificationSettingsService.setEnabled(enabled);
-                })} trackColor={{ false: theme.colors.surfaceMuted, true: theme.colors.accentStrong }} thumbColor={theme.colors.surface} value={preferences?.enabled ?? false} />}
-              />
-              <View style={styles.divider} />
-              <SettingRow
-                label="Daily reminder"
-                description="Review today’s health summary. No health data is included in the notification."
-                theme={theme}
-                muted={controlsDisabled}
-                control={<Switch accessibilityLabel="Daily reminder enabled" disabled={controlsDisabled} onValueChange={(enabled) => void run(async () => {
-                  const { notificationSettingsService } = await appDependencies.getPersistence();
-                  return notificationSettingsService.setDailyReminderEnabled(enabled);
-                })} trackColor={{ false: theme.colors.surfaceMuted, true: theme.colors.accentStrong }} thumbColor={theme.colors.surface} value={preferences?.dailyReminderEnabled ?? false} />}
-              />
-              <View style={styles.divider} />
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Daily reminder time, ${preferences ? formatReminderTime(preferences.reminderTime) : ''}`}
-                disabled={controlsDisabled || !preferences?.dailyReminderEnabled}
-                onPress={openTimePicker}
-                style={({ pressed }) => [styles.timeRow, (controlsDisabled || !preferences?.dailyReminderEnabled) && styles.muted, pressed && styles.pressed]}
-              >
-                <View style={styles.rowCopy}><Text style={styles.rowLabel}>Reminder time</Text><Text style={styles.rowDescription}>Uses this device’s local time, including time-zone changes.</Text></View>
-                <Text style={styles.time}>{preferences ? formatReminderTime(preferences.reminderTime) : '—'}</Text>
-              </Pressable>
-            </View>
+      <View style={styles.group}>
+        <SectionLabel compact title={tr('settings.appearance')} theme={theme} />
+        <SettingsRow {...rowProps} icon="palette" label={tr('settings.theme')} subtitle={getThemeOptions().find((option) => option.id === mode)?.detail} value={getThemeOptions().find((option) => option.id === mode)?.label} onPress={() => setShowThemePicker(true)} />
+        <SettingsRow {...rowProps} icon="language" label={tr('settings.language')} value={language === 'ar' ? tr('settings.arabic') : tr('settings.english')} onPress={() => setShowLanguagePicker(true)} />
+      </View>
 
-            <View style={styles.permissionCard}>
-              <View style={styles.permissionTop}><Text style={styles.cardTitle}>System permission</Text><PermissionPill permission={permission} theme={theme} /></View>
-              <Text style={styles.permissionCopy}>{permissionCopy(permission)}</Text>
-              {permission === 'denied' ? (
-                <Pressable accessibilityRole="button" onPress={() => void Linking.openSettings()} style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}>
-                  <Text style={styles.settingsButtonText}>Open {Platform.OS === 'android' ? 'Android' : 'system'} settings</Text>
-                </Pressable>
-              ) : null}
-            </View>
+      {!snapshot && !error ? <CompactState loading title={tr('settings.loading')} message={tr('settings.readingPrefs')} theme={theme} /> : null}
+      {error ? <CompactState icon="alert" title={snapshot ? tr('settings.failed') : tr('settings.unavailable')} message={error} action={tr('common.retry')} onAction={() => void load()} theme={theme} /> : null}
 
-            <Text style={styles.footer}>Reminders are scheduled entirely on this device. They do not sync Huawei data in the background and are not medical alerts.</Text>
-          </>
-        ) : null}
-      </ScrollView>
-
-      <Modal animationType="fade" onRequestClose={() => setShowIosPicker(false)} transparent visible={showIosPicker}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Daily reminder time</Text>
-            {draftTime ? <DateTimePicker accentColor={theme.colors.accent} mode="time" onValueChange={(_event, date) => setDraftTime(date)} themeVariant={theme.dark ? 'dark' : 'light'} value={draftTime} /> : null}
-            <View style={styles.modalActions}>
-              <Pressable accessibilityRole="button" onPress={() => setShowIosPicker(false)} style={styles.modalButton}><Text style={styles.secondaryButtonText}>Cancel</Text></Pressable>
-              <Pressable accessibilityRole="button" onPress={() => {
-                if (draftTime) void run(() => updateTime({ hour: draftTime.getHours(), minute: draftTime.getMinutes() }));
-                setShowIosPicker(false);
-              }} style={[styles.modalButton, styles.primaryButton]}><Text style={styles.primaryButtonText}>Save</Text></Pressable>
-            </View>
-          </View>
+      {snapshot ? <>
+        <View style={styles.group}>
+          <SectionLabel compact title={tr('settings.notificationsHeading')} theme={theme} />
+          <SettingsRow {...rowProps} icon="bell" label={tr('settings.notifications')} control={<Switch accessibilityLabel={tr('settings.masterA11y')} disabled={busy} style={styles.switchControl} onValueChange={(enabled) => void run(async () => {
+            const { notificationSettingsService } = await appDependencies.getPersistence();
+            return notificationSettingsService.setEnabled(enabled);
+          })} trackColor={{ false: theme.colors.surfaceMuted, true: theme.colors.accentStrong }} thumbColor={theme.colors.surface} value={preferences?.enabled ?? false} />} />
+          <SettingsRow {...rowProps} icon="insights" label={tr('settings.daily')} muted={controlsDisabled} control={<Switch accessibilityLabel={tr('settings.dailyA11y')} disabled={controlsDisabled} style={styles.switchControl} onValueChange={(enabled) => void run(async () => {
+            const { notificationSettingsService } = await appDependencies.getPersistence();
+            return notificationSettingsService.setDailyReminderEnabled(enabled);
+          })} trackColor={{ false: theme.colors.surfaceMuted, true: theme.colors.accentStrong }} thumbColor={theme.colors.surface} value={preferences?.dailyReminderEnabled ?? false} />} />
+          <SettingsRow {...rowProps} icon="clock" label={tr('settings.time')} subtitle={tr('settings.localTime')} emphasizeValue value={preferences ? formatReminderTime(preferences.reminderTime) : '—'} muted={controlsDisabled || !preferences?.dailyReminderEnabled} onPress={openTimePicker} />
+          {permission === 'granted' ? <Text style={styles.groupNote}>{tr('settings.permissionAllowed')}</Text> : <View style={styles.permission}>
+            <View style={styles.permissionHeading}><AppIcon name="bell" color={theme.colors.accent} size={18} /><Text style={styles.permissionTitle}>{permission === 'denied' ? tr('settings.permissionOff') : permission === 'not-determined' ? tr('settings.ready') : tr('settings.remindersUnavailable')}</Text></View>
+            <Text style={styles.permissionCopy}>{permissionCopy(permission)}</Text>
+            {permission === 'denied' ? <Pressable accessibilityRole="button" onPress={() => void Linking.openSettings().catch(() => setError(tr('error.systemSettings')))} style={({ pressed }) => [styles.permissionButton, pressed && styles.pressed]}><Text style={styles.actionText}>{tr('settings.systemSettings')}</Text></Pressable> : null}
+          </View>}
         </View>
-      </Modal>
-    </SafeAreaView>
-  );
+
+        <View style={styles.group}>
+          <SectionLabel compact title={tr('settings.sourceHeading')} theme={theme} />
+          <View testID="settings-source-status" style={styles.sourceSurface}>
+            <View style={styles.sourceHeading}><View style={styles.sourceIcon}><AppIcon name="activity" color={theme.colors.accent} size={24} /></View><View style={styles.sourceCopy}><Text style={styles.sourceName}>{appDependencies.healthProvider.id === 'huawei' ? 'Huawei Health' : tr('state.mock')}</Text><Text style={styles.sourceHelp}>{appDependencies.healthProvider.id === 'huawei' ? tr('settings.huaweiSourceHelp') : tr('settings.mockSourceHelp')}</Text></View></View>
+          </View>
+          <SettingsRow {...rowProps} icon="legal" label={tr('settings.authorization')} value={providerAuthorizationLabel()} />
+          <SettingsRow {...rowProps} icon="clock" label={tr('settings.sync')} subtitle={syncStatusLabel(stats)} value={formatLastSync(stats)} />
+        </View>
+
+        <View style={styles.group}>
+          <SectionLabel compact title={tr('settings.deviceHeading')} theme={theme} />
+          <SettingsRow {...rowProps} icon="database" label={tr('common.recordedDays')} value={String(stats?.storedDays ?? 0)} />
+          <SettingsRow {...rowProps} icon="alert" label={tr('settings.delete')} danger onPress={confirmDelete} />
+          <Text style={styles.groupNote}>{tr('settings.local')}</Text>
+        </View>
+
+        {developerToolsAvailable ? <View style={styles.developmentGroup}><SectionLabel compact title={tr('settings.development')} theme={theme} /><SettingsRow {...rowProps} icon="code" label={tr('dev.tools')} subtitle={tr('dev.buildLabel')} onPress={() => router.push('/developer-tools')} /></View> : null}
+
+        <View style={styles.group}>
+          <SectionLabel compact title={tr('settings.about')} theme={theme} />
+          <SettingsRow {...rowProps} icon="legal" label={tr('settings.privacy')} external onPress={() => void openExternalLink(PRIVACY_POLICY_URL)} />
+          <SettingsRow {...rowProps} icon="legal" label={tr('settings.terms')} external onPress={() => void openExternalLink(USER_AGREEMENT_URL)} />
+          <SettingsRow {...rowProps} icon="insights" label={tr('settings.version')} value={Constants.expoConfig?.version ?? '1.0.0'} />
+          <Text style={styles.aboutName}>{tr('brand.full')}</Text>
+          <Text style={styles.groupNote}>{tr('settings.aboutHelp')}</Text>
+        </View>
+      </> : null}
+    </ScrollView>
+
+    <ProductSheet visible={showThemePicker} title={tr('settings.appearanceTitle')} onClose={() => setShowThemePicker(false)} theme={theme}>
+      <View accessibilityRole="radiogroup">{getThemeOptions().map((option) => <Pressable key={option.id} accessibilityRole="radio" accessibilityState={{ checked: mode === option.id }} onPress={() => void setMode(option.id).then(() => setShowThemePicker(false)).catch(() => setError(tr('error.theme')))} style={({ pressed }) => [styles.themeOption, mode === option.id && styles.selectedOption, pressed && styles.pressed]}>
+        <ThemePreview mode={option.id} theme={theme} /><View style={styles.themeCopy}><Text style={styles.rowLabel}>{option.label}</Text><Text style={styles.optionDetail}>{option.detail}</Text></View><View style={[styles.radioMark, mode === option.id && styles.radioSelected]}>{mode === option.id ? <AppIcon name="check" color={theme.colors.onAccent} size={14} /> : null}</View>
+      </Pressable>)}</View>
+    </ProductSheet>
+    <ProductSheet visible={showLanguagePicker} title={tr('settings.language')} onClose={() => setShowLanguagePicker(false)} theme={theme}>
+      <View accessibilityRole="radiogroup">{(['en', 'ar'] as const).map((option) => <Pressable key={option} accessibilityLabel={option === 'en' ? tr('settings.english') : tr('settings.arabic')} accessibilityRole="radio" accessibilityState={{ checked: language === option, disabled: languageBusy }} disabled={languageBusy} onPress={() => {
+        if (languageBusy) return;
+        setLanguageBusy(true);
+        void setLanguage(option).then(() => setShowLanguagePicker(false)).catch(() => setError(tr('error.language'))).finally(() => setLanguageBusy(false));
+      }} style={({ pressed }) => [styles.themeOption, language === option && styles.selectedOption, pressed && styles.pressed]}><View style={styles.languageMark}><Text style={styles.languageMarkText}>{option === 'en' ? 'Aa' : 'ع'}</Text></View><Text style={[styles.rowLabel, styles.languageLabel]}>{option === 'en' ? tr('settings.english') : tr('settings.arabic')}</Text><View style={[styles.radioMark, language === option && styles.radioSelected]}>{language === option ? <AppIcon name="check" color={theme.colors.onAccent} size={14} /> : null}</View></Pressable>)}</View>
+    </ProductSheet>
+    <ProductSheet visible={showIosPicker} title={tr('settings.time')} subtitle={tr('settings.localTime')} onClose={() => setShowIosPicker(false)} theme={theme}>
+      {draftTime ? <DateTimePicker accentColor={theme.colors.accent} mode="time" onValueChange={(_event, date) => setDraftTime(date)} themeVariant={theme.dark ? 'dark' : 'light'} value={draftTime} /> : null}
+      <View style={styles.pickerActions}><Pressable accessibilityRole="button" onPress={() => setShowIosPicker(false)} style={({ pressed }) => [styles.pickerButton, pressed && styles.pressed]}><Text style={styles.actionText}>{tr('common.cancel')}</Text></Pressable><Pressable accessibilityRole="button" onPress={() => {
+        if (draftTime) void run(() => updateTime({ hour: draftTime.getHours(), minute: draftTime.getMinutes() }));
+        setShowIosPicker(false);
+      }} style={({ pressed }) => [styles.pickerButton, styles.saveButton, pressed && styles.pressed]}><Text style={styles.saveText}>{tr('common.save')}</Text></Pressable></View>
+    </ProductSheet>
+  </SafeAreaView>;
 }
 
-function SettingRow({ label, description, control, theme, muted = false }: { label: string; description: string; control: React.ReactNode; theme: AppTheme; muted?: boolean }) {
-  const styles = createStyles(theme);
-  return <View style={[styles.settingRow, muted && styles.muted]}><View style={styles.rowCopy}><Text style={styles.rowLabel}>{label}</Text><Text style={styles.rowDescription}>{description}</Text></View>{control}</View>;
+function SettingsRow({ label, subtitle, value, control, icon, theme, styles, compact, enlargedText, emphasizeValue = false, muted = false, danger = false, external = false, onPress }: {
+  label: string; subtitle?: string; value?: string; control?: ReactNode; icon?: AppIconName; theme: AppTheme; styles: ReturnType<typeof createStyles>; compact: boolean; enlargedText: boolean; emphasizeValue?: boolean; muted?: boolean; danger?: boolean; external?: boolean; onPress?: () => void;
+}) {
+  // Long provider/status values get their own line on narrow screens; switches
+  // stay beside their labels and keep a full, non-shrinking touch area.
+  const stackValue = !control && !!value && (enlargedText || (compact && !onPress));
+  const content = <>
+    <View style={styles.rowIdentity}>{icon ? <View style={styles.rowIcon}><AppIcon name={icon} color={danger ? theme.colors.danger : theme.colors.textSecondary} size={18} /></View> : null}<View style={styles.rowCopy}><Text style={[styles.rowLabel, danger && { color: theme.colors.danger }]}>{label}</Text>{subtitle ? <Text style={styles.rowSubtitle}>{subtitle}</Text> : null}</View></View>
+    <View style={[styles.rowValueGroup, control ? styles.controlGroup : null, stackValue && styles.rowValueStack]}>{value ? <Text style={[styles.rowValue, emphasizeValue && styles.timeValue]}>{value}</Text> : null}{control}{onPress ? <AppIcon name={external ? 'external' : 'arrow-right'} color={theme.colors.textMuted} size={15} /> : null}</View>
+  </>;
+  const rowStyle = [styles.row, stackValue && styles.stackedRow, muted && styles.muted];
+  return onPress ? <Pressable accessibilityLabel={`${label}${value ? `, ${value}` : ''}`} accessibilityRole={external ? 'link' : 'button'} accessibilityHint={external ? tr('common.browser') : undefined} accessibilityState={{ disabled: muted }} disabled={muted} onPress={onPress} style={({ pressed }) => [...rowStyle, pressed && styles.pressed]}>{content}</Pressable> : <View style={rowStyle}>{content}</View>;
 }
 
-function PermissionPill({ permission, theme }: { permission: NotificationPermissionState; theme: AppTheme }) {
+function ThemePreview({ mode, theme }: { mode: ThemeMode; theme: AppTheme }) {
   const styles = createStyles(theme);
-  return <View style={[styles.pill, permission === 'granted' && styles.pillGranted, permission === 'denied' && styles.pillDenied]}><Text style={[styles.pillText, permission === 'granted' && styles.pillTextGranted, permission === 'denied' && styles.pillTextDenied]}>{permission.replace('-', ' ')}</Text></View>;
+  const colors = createTheme(mode === 'dark' || (mode === 'system' && theme.dark)).colors;
+  return <View accessibilityElementsHidden importantForAccessibility="no" style={[styles.themePreview, { backgroundColor: colors.background }]}><View style={[styles.previewAccent, { backgroundColor: colors.accent }]} /><View style={[styles.previewLine, { backgroundColor: colors.textMuted }]} /><View style={[styles.previewSurface, { backgroundColor: colors.surfaceRaised }]} /></View>;
+}
+
+function formatLastSync(stats: StoredHealthStats | null): string {
+  const timestamp = stats?.sync?.lastSuccessfulAt;
+  if (!timestamp || !Number.isFinite(new Date(timestamp).getTime())) return tr('settings.notSynced');
+  return new Intl.DateTimeFormat(getLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp));
+}
+
+function syncStatusLabel(stats: StoredHealthStats | null): string | undefined {
+  const status = stats?.sync?.status;
+  return status === 'succeeded' ? tr('sync.succeeded') : status === 'failed' ? tr('state.refreshFailed') : status === 'running' ? tr('state.refreshing') : undefined;
 }
 
 function permissionCopy(permission: NotificationPermissionState): string {
-  if (permission === 'granted') return 'This device can show the daily reminder at the selected local time.';
-  if (permission === 'not-determined') return 'Nothing has been requested yet. Turning on Notifications will ask for permission.';
-  if (permission === 'denied') return `Permission is off. The app still works normally; ${Platform.OS === 'android' ? 'Android' : 'system'} settings can enable reminders later.`;
-  if (permission === 'unavailable') return 'Notifications are not available in this environment. The rest of the app still works normally.';
-  return 'The system permission could not be read. Try returning to this screen.';
+  if (permission === 'not-determined') return tr('permission.notDetermined');
+  if (permission === 'denied') return tr('permission.denied');
+  if (permission === 'unavailable') return tr('permission.unavailable');
+  return tr('permission.error');
 }
 
 function dateForTime(time: DailyReminderTime): Date {
@@ -193,48 +255,71 @@ function dateForTime(time: DailyReminderTime): Date {
   return value;
 }
 
-function createStyles(theme: AppTheme) {
+function providerAuthorizationLabel(): string {
+  if (appDependencies.healthProvider.id !== 'huawei') return tr('authorization.notRequired');
+  const provider = appDependencies.healthProvider as typeof appDependencies.healthProvider & { getIntegrationState?: () => { userAuthorization: 'not-performed' | 'authorized' | 'denied' } };
+  const authorization = provider.getIntegrationState?.().userAuthorization;
+  if (authorization === 'authorized') return tr('authorization.authorized');
+  if (authorization === 'denied') return tr('authorization.denied');
+  return tr('authorization.notRequested');
+}
+
+function createStyles(theme: AppTheme, compact = false) {
   return StyleSheet.create({
     safeArea: { backgroundColor: theme.colors.background, flex: 1 },
-    content: { paddingBottom: theme.spacing.xxxl, paddingHorizontal: theme.spacing.lg, paddingTop: theme.spacing.xl },
-    eyebrow: { color: theme.colors.accent, fontSize: theme.typography.eyebrow, fontWeight: '800', letterSpacing: 1.7 },
-    title: { color: theme.colors.text, fontSize: theme.typography.hero, fontWeight: '700', letterSpacing: -1.1, marginTop: theme.spacing.xs },
-    subtitle: { color: theme.colors.textSecondary, fontSize: theme.typography.body, lineHeight: 22, marginTop: theme.spacing.sm, maxWidth: 390 },
-    loading: { alignItems: 'center', flexDirection: 'row', gap: theme.spacing.md, marginTop: theme.spacing.xxl },
-    secondary: { color: theme.colors.textSecondary, fontSize: theme.typography.body },
-    card: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, marginTop: theme.spacing.xxl, overflow: 'hidden' },
-    settingRow: { alignItems: 'center', flexDirection: 'row', gap: theme.spacing.lg, minHeight: 90, padding: theme.spacing.lg },
-    timeRow: { alignItems: 'center', flexDirection: 'row', gap: theme.spacing.lg, minHeight: 90, padding: theme.spacing.lg },
+    content: { alignSelf: 'center', maxWidth: theme.layout.contentMaxWidth, paddingBottom: 32, paddingHorizontal: compact ? 16 : 24, paddingTop: 20, width: '100%' },
+    pageHeading: { alignItems: 'center', flexDirection: 'row', gap: 12 },
+    pageCopy: { flex: 1, minWidth: 0 },
+    headerSymbol: { alignItems: 'center', backgroundColor: theme.colors.surfaceRaised, borderRadius: 16, flexShrink: 0, height: 44, justifyContent: 'center', width: 44 },
+    eyebrow: { color: theme.colors.accent, fontSize: 10, fontWeight: '700', letterSpacing: 1.6 },
+    title: { color: theme.colors.text, fontSize: 32, fontWeight: '700', letterSpacing: -1, marginTop: 5 },
+    group: { marginTop: 26 },
+    developmentGroup: { borderColor: theme.colors.border, borderRadius: 16, borderStyle: 'dashed', borderWidth: 1, marginTop: 26, paddingHorizontal: 12, paddingTop: 12 },
+    row: { alignItems: 'center', borderBottomColor: theme.colors.border, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', gap: 12, minHeight: 60, paddingVertical: 10 },
+    rowIdentity: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: 10, minWidth: 0 },
+    rowIcon: { alignItems: 'center', backgroundColor: theme.colors.surfaceMuted, borderRadius: 10, flexShrink: 0, height: 30, justifyContent: 'center', width: 30 },
     rowCopy: { flex: 1, minWidth: 0 },
-    rowLabel: { color: theme.colors.text, fontSize: theme.typography.cardTitle, fontWeight: '700' },
-    rowDescription: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, lineHeight: 19, marginTop: theme.spacing.xs },
-    time: { color: theme.colors.accent, fontSize: 20, fontVariant: ['tabular-nums'], fontWeight: '800' },
-    divider: { backgroundColor: theme.colors.border, height: StyleSheet.hairlineWidth, marginHorizontal: theme.spacing.lg },
-    muted: { opacity: 0.48 },
-    pressed: { opacity: 0.7 },
-    permissionCard: { backgroundColor: theme.colors.surfaceRaised, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, marginTop: theme.spacing.lg, padding: theme.spacing.xl },
-    permissionTop: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.md, justifyContent: 'space-between' },
-    cardTitle: { color: theme.colors.text, fontSize: theme.typography.cardTitle, fontWeight: '700' },
-    permissionCopy: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, lineHeight: 20, marginTop: theme.spacing.md },
-    pill: { backgroundColor: theme.colors.surfaceMuted, borderRadius: theme.radii.pill, paddingHorizontal: theme.spacing.md, paddingVertical: 6 },
-    pillGranted: { backgroundColor: theme.colors.accentSoft },
-    pillDenied: { backgroundColor: theme.dark ? '#3B2525' : '#F8E2E2' },
-    pillText: { color: theme.colors.textSecondary, fontSize: 11, fontWeight: '800', textTransform: 'uppercase' },
-    pillTextGranted: { color: theme.colors.accent },
-    pillTextDenied: { color: theme.colors.danger },
-    settingsButton: { alignItems: 'center', alignSelf: 'flex-start', borderColor: theme.colors.border, borderRadius: theme.radii.pill, borderWidth: 1, justifyContent: 'center', marginTop: theme.spacing.lg, minHeight: 48, paddingHorizontal: theme.spacing.lg },
-    settingsButtonText: { color: theme.colors.text, fontSize: theme.typography.body, fontWeight: '700' },
-    footer: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 18, marginHorizontal: theme.spacing.md, marginTop: theme.spacing.xxl, textAlign: 'center' },
-    errorCard: { backgroundColor: theme.colors.surface, borderColor: theme.colors.danger, borderRadius: theme.radii.md, borderWidth: 1, marginTop: theme.spacing.xl, padding: theme.spacing.lg },
-    errorTitle: { color: theme.colors.danger, fontSize: theme.typography.cardTitle, fontWeight: '700' },
-    errorText: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, lineHeight: 19, marginTop: theme.spacing.xs },
-    modalBackdrop: { alignItems: 'center', backgroundColor: theme.colors.overlay, flex: 1, justifyContent: 'center', padding: theme.spacing.xl },
-    modalCard: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, maxWidth: 420, padding: theme.spacing.xl, width: '100%' },
-    modalTitle: { color: theme.colors.text, fontSize: 20, fontWeight: '700' },
-    modalActions: { flexDirection: 'row', gap: theme.spacing.md, justifyContent: 'flex-end', marginTop: theme.spacing.lg },
-    modalButton: { alignItems: 'center', borderRadius: theme.radii.pill, justifyContent: 'center', minHeight: 48, paddingHorizontal: theme.spacing.xl },
-    primaryButton: { backgroundColor: theme.colors.accent },
-    primaryButtonText: { color: theme.dark ? '#092116' : '#FFFFFF', fontSize: theme.typography.body, fontWeight: '700' },
-    secondaryButtonText: { color: theme.colors.textSecondary, fontSize: theme.typography.body, fontWeight: '700' },
+    rowLabel: { color: theme.colors.text, flexShrink: 1, fontSize: 15, fontWeight: '500' },
+    rowSubtitle: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 17, marginTop: 4 },
+    rowValueGroup: { alignItems: 'center', flexDirection: 'row', flexShrink: 1, gap: 10, maxWidth: '49%' },
+    controlGroup: { flexShrink: 0, justifyContent: 'flex-end', minHeight: 48, minWidth: 52 },
+    switchControl: { minHeight: 48, minWidth: 52 },
+    rowValue: { color: theme.colors.textSecondary, flexShrink: 1, fontSize: 13, fontVariant: ['tabular-nums'], textTransform: 'capitalize' },
+    timeValue: { color: theme.colors.text, fontSize: 20, fontWeight: '600', letterSpacing: -0.5 },
+    stackedRow: { alignItems: 'stretch', flexDirection: 'column', gap: 6 },
+    rowValueStack: { alignSelf: 'stretch', justifyContent: 'space-between', marginStart: 40, maxWidth: '100%' },
+    groupNote: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 17, marginTop: 10 },
+    sourceSurface: { backgroundColor: theme.colors.surface, borderRadius: 18, marginBottom: 4, padding: 14 },
+    sourceHeading: { alignItems: 'center', flexDirection: 'row', gap: 12 },
+    sourceIcon: { alignItems: 'center', backgroundColor: theme.colors.surfaceRaised, borderRadius: 13, flexShrink: 0, height: 42, justifyContent: 'center', width: 42 },
+    sourceCopy: { flex: 1, minWidth: 0 },
+    sourceName: { color: theme.colors.text, fontSize: 18, fontWeight: '600', letterSpacing: -0.3 },
+    sourceHelp: { color: theme.colors.textSecondary, fontSize: 11, lineHeight: 18, marginTop: 5 },
+    aboutName: { color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginTop: 18 },
+    permission: { borderStartColor: theme.colors.accentMuted, borderStartWidth: 2, marginTop: 12, paddingStart: 12 },
+    permissionHeading: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+    permissionTitle: { color: theme.colors.text, flex: 1, fontSize: 14, fontWeight: '600' },
+    permissionCopy: { color: theme.colors.textSecondary, fontSize: 12, lineHeight: 18, marginTop: 8 },
+    permissionButton: { justifyContent: 'center', minHeight: 48 },
+    actionText: { color: theme.colors.accent, fontSize: 14, fontWeight: '600' },
+    muted: { opacity: 0.72 },
+    pressed: { opacity: 0.6 },
+    themeOption: { alignItems: 'center', borderRadius: 16, flexDirection: 'row', gap: 12, marginBottom: 6, minHeight: 72, paddingHorizontal: 10, paddingVertical: 12 },
+    selectedOption: { backgroundColor: theme.colors.surface },
+    themeCopy: { flex: 1, minWidth: 0 },
+    optionDetail: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 17, marginTop: 4 },
+    themePreview: { borderColor: theme.colors.border, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, flexShrink: 0, height: 48, padding: 7, width: 38 },
+    previewAccent: { borderRadius: 2, height: 3, width: 12 },
+    previewLine: { borderRadius: 2, height: 2, marginTop: 5, width: 20 },
+    previewSurface: { borderRadius: 4, height: 15, marginTop: 5, width: '100%' },
+    radioMark: { alignItems: 'center', borderColor: theme.colors.border, borderRadius: 10, borderWidth: 1.5, flexShrink: 0, height: 20, justifyContent: 'center', width: 20 },
+    radioSelected: { backgroundColor: theme.colors.accentStrong, borderColor: theme.colors.accentStrong },
+    languageMark: { alignItems: 'center', backgroundColor: theme.colors.surfaceMuted, borderRadius: 12, flexShrink: 0, height: 40, justifyContent: 'center', width: 40 },
+    languageMarkText: { color: theme.colors.accent, fontSize: 17, fontWeight: '600' },
+    languageLabel: { flex: 1 },
+    pickerActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'flex-end', marginTop: 16 },
+    pickerButton: { alignItems: 'center', borderRadius: 16, justifyContent: 'center', minHeight: 48, paddingHorizontal: 24 },
+    saveButton: { backgroundColor: theme.colors.accentStrong },
+    saveText: { color: theme.colors.onAccent, fontSize: 14, fontWeight: '700' },
   });
 }

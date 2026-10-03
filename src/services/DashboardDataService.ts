@@ -18,7 +18,7 @@ export type DevelopmentScenarioId = MockHealthScenarioId;
 
 export interface DevelopmentScenarioState {
   current: DevelopmentScenarioId;
-  options: readonly { id: DevelopmentScenarioId; label: string }[];
+  options: readonly { id: DevelopmentScenarioId; label: string; description: string }[];
 }
 
 export class DashboardDataService {
@@ -68,7 +68,7 @@ export class DashboardDataService {
     if (!__DEV__ || !(this.provider instanceof MockHealthProvider)) return null;
     return {
       current: this.provider.getScenario(),
-      options: MOCK_HEALTH_SCENARIOS.map(({ id, label }) => ({ id, label })),
+      options: MOCK_HEALTH_SCENARIOS.map(({ id, label, description }) => ({ id, label, description })),
     };
   }
 

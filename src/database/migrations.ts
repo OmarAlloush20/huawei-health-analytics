@@ -1,6 +1,6 @@
 import type { HealthDatabase } from './types';
 
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 4;
 
 interface Migration {
   version: number;
@@ -124,6 +124,30 @@ const migrations: readonly Migration[] = [
       INSERT INTO notification_preferences (
         id, enabled, daily_reminder_enabled, reminder_hour, reminder_minute, updated_at
       ) VALUES (1, 0, 1, 9, 0, '1970-01-01T00:00:00.000Z');
+    `,
+  },
+  {
+    version: 3,
+    name: 'appearance_preferences',
+    sql: `
+      CREATE TABLE IF NOT EXISTS appearance_preferences (
+        id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+        theme_mode TEXT NOT NULL DEFAULT 'system' CHECK (theme_mode IN ('system', 'dark', 'light')),
+        updated_at TEXT NOT NULL
+      );
+      INSERT OR IGNORE INTO appearance_preferences (id, theme_mode, updated_at)
+      VALUES (1, 'system', '1970-01-01T00:00:00.000Z');
+    `,
+  },
+  {
+    version: 4,
+    name: 'local_product_preferences',
+    sql: `
+      CREATE TABLE IF NOT EXISTS product_preferences (
+        preference_key TEXT PRIMARY KEY NOT NULL,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `,
   },
 ];

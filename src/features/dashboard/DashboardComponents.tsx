@@ -1,18 +1,31 @@
+import { tr } from '../../localization/i18n';
+import { Text, View, Pressable } from '../../localization/LocalizedNative';
 import type { ReactNode } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet } from 'react-native';
 
 import type { MetricAvailability, MetricDisplay } from './dashboardViewModel';
 import type { AppTheme } from '../../theme/theme';
+import { AppIcon, BrandMark, IconBadge, type AppIconName } from '../../components/AppIcon';
 
-export function MetricCard({ label, metric, theme }: { label: string; metric: MetricDisplay; theme: AppTheme }) {
+export function MetricCard({ label, metric, icon, theme }: { label: string; metric: MetricDisplay; icon: AppIconName; theme: AppTheme }) {
   const styles = createStyles(theme);
+  const availability = metric.status === 'missing'
+    ? tr('common.noData')
+    : metric.status === 'unsupported'
+      ? tr('common.unavailable')
+      : metric.status === 'query-failed'
+        ? tr('state.refreshNeeded')
+        : null;
   return (
-    <View style={styles.metricCard} accessibilityLabel={`${label}: ${metric.value}${metric.unit ? ` ${metric.unit}` : ''}`}>
+    <View accessible style={styles.metricCard} accessibilityLabel={`${label}: ${metric.value}${metric.unit ? ` ${metric.unit}` : ''}`}>
       <View style={styles.metricHeader}>
-        <View style={[styles.metricDot, metric.status !== 'available' && styles.metricDotMuted]} />
-        <Text style={styles.metricLabel}>{label}</Text>
+        <View style={styles.metricIdentity}>
+          <IconBadge background={metric.status === 'available' ? theme.colors.accentSoft : theme.colors.surfaceMuted} color={metric.status === 'available' ? theme.colors.accent : theme.colors.textMuted} name={icon} size={34} />
+          <Text style={styles.metricLabel}>{label}</Text>
+        </View>
+        {availability ? <Text style={styles.availabilityBadge}>{availability}</Text> : null}
       </View>
-      <Text style={[styles.metricValue, metric.status !== 'available' && styles.unavailableValue]} numberOfLines={2} adjustsFontSizeToFit>
+      <Text style={[styles.metricValue, metric.status !== 'available' && styles.unavailableValue]}>
         {metric.value}
       </Text>
       {metric.unit ? <Text style={styles.metricUnit}>{metric.unit}</Text> : null}
@@ -34,7 +47,7 @@ export function StatePanel({ title, message, actionLabel, onAction, loading, the
   const styles = createStyles(theme);
   return (
     <View style={styles.statePanel}>
-      {loading ? <ActivityIndicator color={theme.colors.accent} size="large" /> : <View style={styles.stateMark}><View style={styles.stateMarkInner} /></View>}
+      {loading ? <View style={styles.loadingMark}><BrandMark size={58} /><ActivityIndicator color={theme.colors.accent} style={styles.loadingSpinner} /></View> : <View style={styles.stateMark}><AppIcon color={theme.colors.accent} name="insights" size={32} /></View>}
       <Text style={styles.stateTitle}>{title}</Text>
       <Text style={styles.stateMessage}>{message}</Text>
       {actionLabel && onAction ? (
@@ -58,22 +71,23 @@ export function AvailabilityLabel({ status, theme }: { status: MetricAvailabilit
 
 function createStyles(theme: AppTheme) {
   return StyleSheet.create({
-    section: { marginTop: theme.spacing.xl },
+    section: { marginTop: theme.spacing.xxl },
     metricCard: {
       backgroundColor: theme.colors.surface,
       borderColor: theme.colors.border,
       borderRadius: theme.radii.lg,
       borderWidth: 1,
+      flexBasis: 180,
       flexGrow: 1,
-      minHeight: 154,
-      minWidth: 145,
+      minHeight: 158,
+      minWidth: 170,
       padding: theme.spacing.lg,
     },
-    metricHeader: { alignItems: 'center', flexDirection: 'row', gap: theme.spacing.sm },
-    metricDot: { backgroundColor: theme.colors.accent, borderRadius: 4, height: 8, width: 8 },
-    metricDotMuted: { backgroundColor: theme.colors.textMuted },
-    metricLabel: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, fontWeight: '600' },
-    metricValue: { color: theme.colors.text, fontSize: theme.typography.metric, fontWeight: '700', letterSpacing: -0.6, marginTop: theme.spacing.lg },
+    metricHeader: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.sm, justifyContent: 'space-between' },
+    metricIdentity: { alignItems: 'center', flex: 1, flexBasis: 105, flexDirection: 'row', gap: theme.spacing.sm, minWidth: 0 },
+    metricLabel: { color: theme.colors.textSecondary, flexShrink: 1, fontSize: 12, fontWeight: '700', lineHeight: 16 },
+    availabilityBadge: { backgroundColor: theme.colors.surfaceMuted, borderRadius: theme.radii.pill, color: theme.colors.textMuted, fontSize: 9, fontWeight: '700', overflow: 'hidden', paddingHorizontal: 7, paddingVertical: 3 },
+    metricValue: { color: theme.colors.text, fontSize: theme.typography.metric, fontWeight: '800', letterSpacing: -0.8, marginTop: theme.spacing.lg },
     unavailableValue: { color: theme.colors.textSecondary, fontSize: 17, lineHeight: 23 },
     metricUnit: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, marginTop: 2 },
     metricDetail: { color: theme.colors.textMuted, fontSize: theme.typography.caption, marginTop: theme.spacing.md },
@@ -82,11 +96,12 @@ function createStyles(theme: AppTheme) {
     availability: { color: theme.colors.textMuted, fontSize: 11, marginTop: theme.spacing.sm, textTransform: 'capitalize' },
     statePanel: { alignItems: 'center', flex: 1, justifyContent: 'center', paddingHorizontal: theme.spacing.xxl },
     stateMark: { alignItems: 'center', backgroundColor: theme.colors.accentSoft, borderRadius: 36, height: 72, justifyContent: 'center', width: 72 },
-    stateMarkInner: { backgroundColor: theme.colors.accent, borderRadius: 13, height: 26, width: 26 },
+    loadingMark: { alignItems: 'center', height: 72, justifyContent: 'center', width: 72 },
+    loadingSpinner: { position: 'absolute' },
     stateTitle: { color: theme.colors.text, fontSize: 22, fontWeight: '700', marginTop: theme.spacing.xl, textAlign: 'center' },
     stateMessage: { color: theme.colors.textSecondary, fontSize: theme.typography.body, lineHeight: 22, marginTop: theme.spacing.sm, maxWidth: 330, textAlign: 'center' },
-    primaryButton: { backgroundColor: theme.colors.accent, borderRadius: theme.radii.pill, marginTop: theme.spacing.xl, minHeight: 48, paddingHorizontal: theme.spacing.xl, justifyContent: 'center' },
-    primaryButtonText: { color: theme.dark ? '#092116' : '#FFFFFF', fontSize: theme.typography.body, fontWeight: '700' },
+    primaryButton: { backgroundColor: theme.colors.accent, borderRadius: theme.radii.pill, marginTop: theme.spacing.xl, minHeight: theme.layout.minimumTouchTarget, paddingHorizontal: theme.spacing.xl, justifyContent: 'center' },
+    primaryButtonText: { color: theme.colors.onAccent, fontSize: theme.typography.body, fontWeight: '700' },
     pressed: { opacity: 0.76 },
   });
 }

@@ -14,6 +14,8 @@ import { InsightsService } from './services/InsightsService';
 import { SQLiteNotificationPreferencesRepository } from './repositories/NotificationPreferencesRepository';
 import { ExpoNotificationAdapter } from './notifications/ExpoNotificationAdapter';
 import { NotificationSettingsService } from './services/NotificationSettingsService';
+import { SQLiteAppearancePreferencesRepository } from './repositories/AppearancePreferencesRepository';
+import { SQLiteProductPreferencesRepository } from './repositories/ProductPreferencesRepository';
 
 function createHealthProvider(): HealthDataProvider {
   if (process.env.EXPO_PUBLIC_HEALTH_PROVIDER !== 'huawei') {
@@ -41,6 +43,8 @@ const persistencePromise = databasePromise.then((database) => {
   const trendsService = new TrendsService(healthProvider.id, repository);
   const insightsService = new InsightsService(trendsService);
   const notificationPreferences = new SQLiteNotificationPreferencesRepository(database);
+  const appearancePreferences = new SQLiteAppearancePreferencesRepository(database);
+  const productPreferences = new SQLiteProductPreferencesRepository(database);
   const notificationSettingsService = new NotificationSettingsService(notificationPreferences, new ExpoNotificationAdapter());
   return {
     database,
@@ -52,6 +56,8 @@ const persistencePromise = databasePromise.then((database) => {
     insightsService,
     notificationPreferences,
     notificationSettingsService,
+    appearancePreferences,
+    productPreferences,
     dashboardService: new DashboardDataService(healthProvider, database, repository, syncService, recoveryService, insightsService),
   };
 });

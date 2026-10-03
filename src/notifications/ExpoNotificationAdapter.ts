@@ -2,7 +2,8 @@ import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 
 import type { DailyReminderTime, NotificationPermissionState } from '../models/notifications';
-import { DAILY_REMINDER_BODY, DAILY_REMINDER_TITLE, DAILY_REMINDER_TYPE, NOTIFICATION_OWNER } from '../services/notificationPolicy';
+import { DAILY_REMINDER_TITLE, DAILY_REMINDER_TYPE, NOTIFICATION_OWNER } from '../services/notificationPolicy';
+import { tr } from '../localization/i18n';
 import type { NotificationAdapter } from './NotificationAdapter';
 import { notificationPermissionFromResponse } from './notificationPermission';
 
@@ -30,8 +31,8 @@ export class ExpoNotificationAdapter implements NotificationAdapter {
   async ensureDailyReminderChannel(): Promise<void> {
     if (Platform.OS !== 'android') return;
     await Notifications.setNotificationChannelAsync(DAILY_REMINDER_CHANNEL_ID, {
-      name: 'Daily health summary',
-      description: 'A calm daily reminder to review your locally stored health summary.',
+      name: tr('notification.channel'),
+      description: tr('notification.channelHelp'),
       importance: Notifications.AndroidImportance.DEFAULT,
       sound: null,
       enableVibrate: false,
@@ -50,7 +51,7 @@ export class ExpoNotificationAdapter implements NotificationAdapter {
     return Notifications.scheduleNotificationAsync({
       content: {
         title: DAILY_REMINDER_TITLE,
-        body: DAILY_REMINDER_BODY,
+        body: tr('notification.body'),
         data: {
           notificationOwner: NOTIFICATION_OWNER,
           notificationType: DAILY_REMINDER_TYPE,

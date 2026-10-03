@@ -4,7 +4,9 @@ Local-first personal health analytics for Android, built with React Native, Type
 
 Android application ID: `com.omar.huaweihealthanalytics`.
 
-Milestone 0 uses a mock provider. Huawei Health access is intentionally deferred to the connection spike in Milestone 1.
+The app provides daily summaries, personal Recovery, metric history, Trends, Insights, and persisted theme/language preferences. See the [User Guide](docs/USER_GUIDE.md) for features and usage.
+
+Huawei integration currently supports authorized step retrieval only; broader Health Service Kit access remains pending approval/integration. Mock/development readings are synthetic, not live Huawei measurements.
 
 ## Development
 

@@ -14,6 +14,8 @@ import { DATABASE_SCHEMA_VERSION, getSchemaVersion, migrateHealthDatabase } from
 import { resetAndReseedDevelopmentDatabase } from './developmentReset';
 import type { HealthDatabase, SqlBindValue, SqlExecutor } from './types';
 import { SQLiteNotificationPreferencesRepository } from '../repositories/NotificationPreferencesRepository';
+import { SQLiteAppearancePreferencesRepository } from '../repositories/AppearancePreferencesRepository';
+import { normalizeFocusMetrics, normalizeTrendsWorkspace, SQLiteProductPreferencesRepository } from '../repositories/ProductPreferencesRepository';
 
 class NodeMemoryDatabase implements HealthDatabase {
   readonly raw = new DatabaseSync(':memory:');
@@ -64,7 +66,7 @@ describe('SQLite health persistence', () => {
     expect(await getSchemaVersion(database)).toBe(DATABASE_SCHEMA_VERSION);
     await migrateHealthDatabase(database);
     const row = await database.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM schema_migrations');
-    expect(row?.count).toBe(2);
+    expect(row?.count).toBe(4);
     expect(await new SQLiteNotificationPreferencesRepository(database).get()).toMatchObject({
       enabled: false,
       dailyReminderEnabled: true,
@@ -73,7 +75,7 @@ describe('SQLite health persistence', () => {
     });
   });
 
-  test('upgrades a Milestone 7 schema from v1 to v2 without replacing existing health data', async () => {
+  test('upgrades a Milestone 7 schema without replacing existing health data', async () => {
     const legacy = new NodeMemoryDatabase();
     legacy.raw.exec(`
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, applied_at TEXT NOT NULL);
@@ -83,10 +85,80 @@ describe('SQLite health persistence', () => {
       PRAGMA user_version = 1;
     `);
     await migrateHealthDatabase(legacy);
-    expect(await getSchemaVersion(legacy)).toBe(2);
+    expect(await getSchemaVersion(legacy)).toBe(DATABASE_SCHEMA_VERSION);
     expect(await legacy.getFirstAsync<{ marker: string }>('SELECT marker FROM daily_summaries')).toEqual({ marker: 'preserved' });
     expect(await new SQLiteNotificationPreferencesRepository(legacy).get()).toMatchObject({ enabled: false, dailyReminderEnabled: true });
     legacy.close();
+  });
+
+  test('persists language independently of theme/focus and preserves it through health deletion and reseeding', async () => {
+    const preferences = new SQLiteProductPreferencesRepository(database);
+    expect(await preferences.getLanguage()).toBe('en');
+    await preferences.setFocusMetrics(['hrv', 'stress']);
+    await preferences.setLanguage('ar');
+    expect(await new SQLiteProductPreferencesRepository(database).getLanguage()).toBe('ar');
+    expect(await preferences.getFocusMetrics()).toEqual(['hrv', 'stress']);
+    expect(await new SQLiteAppearancePreferencesRepository(database).getThemeMode()).toBe('system');
+    await sync.deleteAllLocalHealthData();
+    expect(await preferences.getLanguage()).toBe('ar');
+    await resetAndReseedDevelopmentDatabase(database, sync, fullRange);
+    expect(await new SQLiteProductPreferencesRepository(database).getLanguage()).toBe('ar');
+    await preferences.setLanguage('en');
+    expect(await preferences.getLanguage()).toBe('en');
+    for (const value of ['"fr"', 'null', '{invalid']) {
+      await database.runAsync('UPDATE product_preferences SET value_json = ? WHERE preference_key = ?', value, 'app_language');
+      expect(await preferences.getLanguage()).toBe('en');
+    }
+  });
+
+  test('persists the app theme preference and defaults to System', async () => {
+    const appearance = new SQLiteAppearancePreferencesRepository(database);
+    expect(await appearance.getThemeMode()).toBe('system');
+    await appearance.setThemeMode('dark', '2026-10-02T10:00:00.000Z');
+    expect(await appearance.getThemeMode()).toBe('dark');
+    await appearance.setThemeMode('light', '2026-10-02T10:01:00.000Z');
+    expect(await appearance.getThemeMode()).toBe('light');
+    await sync.deleteAllLocalHealthData();
+    await resetAndReseedDevelopmentDatabase(database, sync, fullRange);
+    expect(await new SQLiteAppearancePreferencesRepository(database).getThemeMode()).toBe('light');
+  });
+
+  test('remembers only a valid Trends metric/range independently of health deletion, reset, language and focus', async () => {
+    const preferences = new SQLiteProductPreferencesRepository(database);
+    expect(await preferences.getTrendsWorkspace()).toEqual({ metric: 'recovery', range: '7d' });
+    await preferences.setLanguage('ar');
+    await preferences.setFocusMetrics(['hrv', 'rhr']);
+    await preferences.setTrendsWorkspace({ metric: 'hrv-rmssd', range: '30d' });
+    const reopened = new SQLiteProductPreferencesRepository(database);
+    expect(await reopened.getTrendsWorkspace()).toEqual({ metric: 'hrv-rmssd', range: '30d' });
+    await sync.deleteAllLocalHealthData();
+    await resetAndReseedDevelopmentDatabase(database, sync, fullRange);
+    expect(await reopened.getTrendsWorkspace()).toEqual({ metric: 'hrv-rmssd', range: '30d' });
+    expect(await reopened.getLanguage()).toBe('ar');
+    expect(await reopened.getFocusMetrics()).toEqual(['hrv', 'rhr']);
+    for (const value of ['null', '[]', '{invalid', '{"metric":"stress","range":"1d"}']) {
+      await database.runAsync('UPDATE product_preferences SET value_json = ? WHERE preference_key = ?', value, 'trends_workspace');
+      expect(await preferences.getTrendsWorkspace()).toEqual({ metric: 'recovery', range: '7d' });
+    }
+    expect(normalizeTrendsWorkspace({ metric: 'steps', range: 'invalid', selectedDate: '2026-09-28', compareMetric: 'recovery' })).toEqual({ metric: 'steps', range: '7d' });
+    expect(normalizeTrendsWorkspace({ metric: 'invalid', range: '90d' })).toEqual({ metric: 'recovery', range: '90d' });
+    const unsafe = { metric: 'steps', range: '90d', selectedDate: '2026-09-28', compareMetric: 'recovery' };
+    await preferences.setTrendsWorkspace(unsafe as Parameters<typeof preferences.setTrendsWorkspace>[0]);
+    const row = await database.getFirstAsync<{ value_json: string }>('SELECT value_json FROM product_preferences WHERE preference_key = ?', 'trends_workspace');
+    expect(JSON.parse(row!.value_json)).toEqual({ metric: 'steps', range: '90d' });
+  });
+
+  test('persists chosen Today readings across repository creation, health deletion and development reseeding', async () => {
+    const preferences = new SQLiteProductPreferencesRepository(database);
+    expect(await preferences.getFocusMetrics()).toEqual([]);
+    await preferences.setFocusMetrics(['stress', 'hrv', 'sleep']);
+    expect(await new SQLiteProductPreferencesRepository(database).getFocusMetrics()).toEqual(['stress', 'hrv', 'sleep']);
+    await sync.deleteAllLocalHealthData();
+    expect(await preferences.getFocusMetrics()).toEqual(['stress', 'hrv', 'sleep']);
+    await resetAndReseedDevelopmentDatabase(database, sync, fullRange);
+    expect(await preferences.getFocusMetrics()).toEqual(['stress', 'hrv', 'sleep']);
+    expect(normalizeFocusMetrics(['hrv', 'recovery', 'hrv', 'rhr', 'sleep', 'stress'])).toEqual(['hrv', 'rhr', 'sleep']);
+    expect(normalizeFocusMetrics('broken')).toEqual([]);
   });
 
   test('persists notification preferences and scheduler metadata in the singleton row', async () => {
@@ -107,7 +179,7 @@ describe('SQLite health persistence', () => {
   test('imports and reconstructs normalized daily and range data', async () => {
     const persisted = await sync.sync(fullRange);
     const stats = await sync.getStats();
-    expect(stats).toMatchObject({ storedDays: 90, firstDate: fullRange.start, lastDate: fullRange.end, schemaVersion: 2 });
+    expect(stats).toMatchObject({ storedDays: 90, firstDate: fullRange.start, lastDate: fullRange.end, schemaVersion: DATABASE_SCHEMA_VERSION });
     expect(persisted.dailySummaries.status).toBe('available');
 
     const expected = await provider.getDailySummary({ date: MOCK_ANCHOR_DATE, timeZone: MOCK_TIME_ZONE });
@@ -160,6 +232,23 @@ describe('SQLite health persistence', () => {
     expect(day.baselines?.sleepDuration).toMatchObject({ status: 'learning', validSampleCount: 6 });
     expect(day.recovery?.status).toBe('learning');
     expect(day.recovery?.score).toBeUndefined();
+  });
+
+  test('exposes all six deterministic scenarios with descriptive UI-state copy', () => {
+    const baseline = new BaselineService('mock', repository);
+    const trends = new TrendsService('mock', repository);
+    const dashboard = new DashboardDataService(provider, database, repository, sync, new RecoveryService(baseline), new InsightsService(trends));
+    const state = dashboard.getDevelopmentScenarios();
+    expect(state?.current).toBe('balanced');
+    expect(state?.options.map((option) => option.id)).toEqual([
+      'balanced',
+      'poor-sleep',
+      'low-hrv-elevated-rhr',
+      'high-activity',
+      'insufficient-history',
+      'missing-data',
+    ]);
+    expect(state?.options.every((option) => option.description.length > 30)).toBe(true);
   });
 
   test('repeated sync is idempotent for every stable entity', async () => {
@@ -233,10 +322,10 @@ describe('SQLite health persistence', () => {
   test('development reset drops, remigrates, and reseeds safely', async () => {
     await sync.sync(fullRange);
     await resetAndReseedDevelopmentDatabase(database, sync, fullRange);
-    expect(await getSchemaVersion(database)).toBe(2);
+    expect(await getSchemaVersion(database)).toBe(DATABASE_SCHEMA_VERSION);
     expect((await sync.getStats()).storedDays).toBe(90);
     const migrations = await database.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM schema_migrations');
-    expect(migrations?.count).toBe(2);
+    expect(migrations?.count).toBe(DATABASE_SCHEMA_VERSION);
   });
 
   test('records sync failures without erasing the last successful timestamp', async () => {

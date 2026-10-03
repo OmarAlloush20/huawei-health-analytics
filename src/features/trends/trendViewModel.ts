@@ -1,3 +1,4 @@
+import { tr } from '../../localization/i18n';
 import type { TrendMetricId, TrendReport, TrendSeries } from '../../models/trends';
 import { formatNumber, formatSleepDuration } from '../../shared/formatters/healthFormatters';
 
@@ -6,6 +7,9 @@ export interface TrendCardViewModel {
   label: string;
   unit: string;
   headline: string;
+  latest: string;
+  latestDate?: string;
+  baseline: string;
   comparison: string;
   coverage: string;
   points: TrendSeries['points'];
@@ -17,13 +21,13 @@ export interface TrendsViewModel {
   consistency: string;
 }
 
-const labels: Record<TrendMetricId, string> = {
-  recovery: 'Recovery',
-  'sleep-duration': 'Sleep duration',
-  'hrv-rmssd': 'HRV',
-  'resting-heart-rate': 'Resting heart rate',
-  steps: 'Steps',
-};
+function getLabels(): Record<TrendMetricId, string> { return {
+  recovery: tr('metric.recovery'),
+  'sleep-duration': tr('metric.sleepDuration'),
+  'hrv-rmssd': tr('metric.hrv'),
+  'resting-heart-rate': tr('metric.rhrFull'),
+  steps: tr('metric.steps'),
+}; }
 
 const units: Record<TrendMetricId, string> = {
   recovery: '/ 100',
@@ -50,38 +54,52 @@ function formatted(metric: TrendMetricId, value: number): string {
   return formatNumber(Math.round(value * 10) / 10);
 }
 
+function latestPoint(series: TrendSeries) {
+  return [...series.points].reverse().find((point) => point.status === 'available' && point.value !== undefined);
+}
+
+function baselineCopy(metric: TrendMetricId, series: TrendSeries): string {
+  const point = [...series.points].reverse().find((candidate) => candidate.lowerBound !== undefined && candidate.upperBound !== undefined);
+  if (!point || point.lowerBound === undefined || point.upperBound === undefined) return tr('common.notAvailable');
+  return `${formatted(metric, point.lowerBound)}–${formatted(metric, point.upperBound)}`;
+}
+
 function comparisonCopy(series: TrendSeries, days: number): string {
   const comparison = series.comparison;
-  if (comparison.direction === 'insufficient-data') return 'Not enough coverage for the previous-period comparison';
-  if (comparison.direction === 'stable') return `Stable versus the previous ${days} days`;
-  const direction = comparison.direction === 'increasing' ? 'higher' : 'lower';
+  if (comparison.direction === 'insufficient-data') return tr('state.noCoverage');
+  if (comparison.direction === 'stable') return tr('format.stable', { days });
+  const direction = comparison.direction === 'increasing' ? 'format.higher' : 'format.lower';
   const change = Math.abs(comparison.absoluteChange ?? 0);
-  if (series.metric === 'sleep-duration') return `${formatSleepDuration(Math.round(change))} ${direction} than the previous period`;
-  const unit = series.metric === 'recovery' ? 'points' : series.unit;
-  return `${formatted(series.metric, change)} ${unit} ${direction} than the previous period`;
+  if (series.metric === 'sleep-duration') return tr(direction, { value: formatSleepDuration(Math.round(change)) });
+  const value = series.metric === 'recovery' ? tr('format.readingPoints', { amount: formatted(series.metric, change) }) : series.metric === 'steps' ? tr('format.readingSteps', { amount: formatted(series.metric, change) }) : `${formatted(series.metric, change)} ${series.unit}`;
+  return tr(direction, { value });
 }
 
 export function buildTrendsViewModel(report: TrendReport): TrendsViewModel {
   const order: TrendMetricId[] = ['recovery', 'sleep-duration', 'hrv-rmssd', 'resting-heart-rate', 'steps'];
   return {
-    rangeLabel: `${report.days}-day view`,
+    rangeLabel: tr('format.period', { count: report.days }),
     cards: order.map((metric) => {
       const series = report.series[metric];
       const value = currentValue(series);
+      const latest = latestPoint(series);
       return {
         metric,
-        label: labels[metric],
+        label: getLabels()[metric],
         unit: units[metric],
-        headline: value === undefined ? 'No usable data' : formatted(metric, value),
+        headline: value === undefined ? tr('common.noUsableData') : formatted(metric, value),
+        latest: latest?.value === undefined ? tr('common.noUsableData') : formatted(metric, latest.value),
+        latestDate: latest?.date,
+        baseline: baselineCopy(metric, series),
         comparison: comparisonCopy(series, report.days),
-        coverage: `${series.availableDays} of ${series.expectedDays} days available`,
+        coverage: tr('format.coverage', { available: series.availableDays, expected: series.expectedDays }),
         points: series.points,
       };
     }),
     consistency: report.sleepConsistency.status !== 'available'
-      ? 'Not enough bedtime data for a consistency comparison'
+      ? tr('state.noBedtimeComparison')
       : report.sleepConsistency.direction === 'stable'
-        ? 'Bedtime consistency was stable versus the previous period'
-        : `Bedtime was ${report.sleepConsistency.direction === 'improving' ? 'more' : 'less'} consistent by ${Math.abs(report.sleepConsistency.changeMinutes ?? 0)} minutes`,
+        ? tr('consistency.stable')
+        : tr(report.sleepConsistency.direction === 'improving' ? 'consistency.more' : 'consistency.less', { amount: Math.abs(report.sleepConsistency.changeMinutes ?? 0) }),
   };
 }

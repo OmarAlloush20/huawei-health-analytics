@@ -1,371 +1,205 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useColorScheme,
-  View,
-} from 'react-native';
+import { getLocale, tr } from '../../localization/i18n';
+import { Text, View, Pressable } from '../../localization/LocalizedNative';
+import { router, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { RefreshControl, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { appDependencies } from '../../appDependencies';
-import type { DailyHealthSummary, LocalDate } from '../../models/health';
-import type { DailyBaselineSet } from '../../models/baseline';
-import type { RecoveryResult } from '../../models/recovery';
-import type { DeterministicInsight } from '../../models/insights';
+import { AppIcon, BrandMark, type AppIconName } from '../../components/AppIcon';
+import { CompactState, ProductSheet, Reveal, SectionLabel } from '../../components/ProductUI';
+import { MovementBars, SleepComposition, Sparkline } from '../../components/SignalVisuals';
 import type { StoredHealthStats } from '../../database/types';
-import type { DevelopmentScenarioId, DevelopmentScenarioState } from '../../services/DashboardDataService';
-import { getSystemTimeZone, toLocalDate } from '../../shared/dates/healthDates';
-import { createTheme, type AppTheme } from '../../theme/theme';
-import { DashboardSection, MetricCard, StatePanel } from './DashboardComponents';
-import { buildDashboardViewModel, formatSyncFreshness, getEmptyDashboardMessage, moveDashboardDate } from './dashboardViewModel';
+import type { DailyHealthSummary, LocalDate } from '../../models/health';
+import type { TrendReport } from '../../models/trends';
+import { FOCUS_METRICS, MAX_FOCUS_METRICS, type FocusMetric } from '../../repositories/ProductPreferencesRepository';
+import type { DashboardDayData } from '../../services/DashboardDataService';
+import { addLocalDays, getSystemTimeZone, toLocalDate } from '../../shared/dates/healthDates';
+import { formatNumber } from '../../shared/formatters/healthFormatters';
+import { getResponsiveLayout } from '../../theme/responsive';
+import { useAppTheme } from '../../theme/ThemeContext';
+import type { AppTheme } from '../../theme/theme';
+import { buildTrendsViewModel } from '../trends/trendViewModel';
+import { DateHistoryPicker } from './DateHistoryPicker';
+import { DateNavigator } from './DateNavigator';
+import { TodayRecovery } from './TodayRecovery';
+import { buildDashboardViewModel, formatSyncFreshness, type MetricDisplay } from './dashboardViewModel';
+import { compactFreshness, formatSelectedDate, readingPoints, shortBaseline } from './todayPresentation';
 
-type ScreenPhase = 'initializing' | 'ready' | 'empty' | 'error';
+interface TodayData { day: DashboardDayData; history: DailyHealthSummary[]; week: TrendReport }
+function getFocusMeta(): Record<FocusMetric, { label: string; full: string; icon: AppIconName }> { return {
+  hrv: { label: tr('metric.hrv'), full: tr('metric.hrvFull'), icon: 'hrv' },
+  rhr: { label: tr('metric.rhr'), full: tr('metric.rhrFull'), icon: 'heart' },
+  sleep: { label: tr('metric.sleep'), full: tr('metric.sleep'), icon: 'sleep' },
+  spo2: { label: tr('metric.spo2'), full: tr('metric.oxygen'), icon: 'oxygen' },
+  stress: { label: tr('metric.stress'), full: tr('metric.stress'), icon: 'stress' },
+  activity: { label: tr('metric.activity'), full: tr('metric.activity'), icon: 'activity' },
+}; }
 
 export function HomeDashboard() {
-  const systemScheme = useColorScheme();
-  const theme = useMemo(() => createTheme(systemScheme !== 'light'), [systemScheme]);
-  const styles = useMemo(() => createStyles(theme), [theme]);
-  const [phase, setPhase] = useState<ScreenPhase>('initializing');
-  const [summary, setSummary] = useState<DailyHealthSummary | null>(null);
-  const [baselines, setBaselines] = useState<DailyBaselineSet | null>(null);
-  const [recovery, setRecovery] = useState<RecoveryResult | null>(null);
-  const [insight, setInsight] = useState<DeterministicInsight | null>(null);
-  const [showRecoveryDetails, setShowRecoveryDetails] = useState(false);
+  const { theme } = useAppTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const layout = getResponsiveLayout(width, fontScale);
+  const styles = useMemo(() => createStyles(theme, layout.singleColumn), [layout.singleColumn, theme]);
+  const [data, setData] = useState<TodayData | null>(null);
   const [stats, setStats] = useState<StoredHealthStats | null>(null);
-  const [selectedDate, setSelectedDate] = useState<LocalDate | null>(null);
-  const [today, setToday] = useState<LocalDate | null>(null);
-  const [error, setError] = useState('');
+  const [date, setDate] = useState<LocalDate | null>(null);
+  const selectedRef = useRef<LocalDate | null>(null);
+  const request = useRef(0);
+  const [dates, setDates] = useState<LocalDate[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [showDevelopmentData, setShowDevelopmentData] = useState(false);
-  const [developmentScenarios, setDevelopmentScenarios] = useState<DevelopmentScenarioState | null>(null);
-  const [canRefreshEmpty, setCanRefreshEmpty] = useState(false);
+  const [error, setError] = useState('');
+  const [calendar, setCalendar] = useState(false);
+  const [sheet, setSheet] = useState<'focus' | 'week' | 'freshness' | null>(null);
+  const [focus, setFocus] = useState<FocusMetric[]>([]);
+  const [draftFocus, setDraftFocus] = useState<FocusMetric[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const timeZone = stats?.sync?.range?.timeZone ?? getSystemTimeZone();
+  const today = toLocalDate(new Date(), timeZone);
 
-  const readPersistedDay = useCallback(async (date: LocalDate, nextStats: StoredHealthStats) => {
-    const { dashboardService } = await appDependencies.getPersistence();
-    const timeZone = nextStats.sync?.range?.timeZone ?? getSystemTimeZone();
-    const result = await dashboardService.readDay(date, timeZone);
-    setSummary(result.summary);
-    setBaselines(result.baselines);
-    setRecovery(result.recovery);
-    setInsight(result.insight);
-    setShowRecoveryDetails(false);
-    setSelectedDate(date);
-    setPhase(result.summary ? 'ready' : 'empty');
+  const readDate = useCallback(async (next: LocalDate, nextStats: StoredHealthStats, id: number) => {
+    const { dashboardService, repository, trendsService } = await appDependencies.getPersistence();
+    if (id !== request.current) return;
+    const zone = nextStats.sync?.range?.timeZone ?? getSystemTimeZone();
+    const [day, history, week] = await Promise.all([
+      dashboardService.readDay(next, zone),
+      repository.getDailySummaries(nextStats.provider, { start: addLocalDays(next, -6), end: next, timeZone: zone }),
+      trendsService.getReport('7d', next, zone),
+    ]);
+    if (id !== request.current) return;
+    selectedRef.current = next;
+    setDate(next); setData({ day, history, week }); setStats(nextStats); setExpanded(false);
   }, []);
 
-  const initialize = useCallback(async () => {
+  const initialize = useCallback(async (id = ++request.current) => {
     try {
-      const { dashboardService } = await appDependencies.getPersistence();
-      setError('');
+      const { dashboardService, repository, productPreferences } = await appDependencies.getPersistence();
       let nextStats = await dashboardService.getStats();
+      if (id !== request.current) return;
       nextStats = await dashboardService.bootstrapDevelopmentDataIfEmpty(nextStats);
-      setDevelopmentScenarios(dashboardService.getDevelopmentScenarios());
-      setCanRefreshEmpty(dashboardService.canRefreshEmptyDatabase());
-      const timeZone = nextStats.sync?.range?.timeZone ?? getSystemTimeZone();
-      const localToday = toLocalDate(new Date(), timeZone);
-      setToday(localToday);
-      setStats(nextStats);
-      await readPersistedDay(localToday, nextStats);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The local health database could not be opened.');
-      setPhase('error');
-    }
-  }, [readPersistedDay]);
+      if (id !== request.current) return;
+      const zone = nextStats.sync?.range?.timeZone ?? getSystemTimeZone();
+      const [history, chosen] = await Promise.all([
+        nextStats.firstDate && nextStats.lastDate ? repository.getDailySummaries(nextStats.provider, { start: nextStats.firstDate, end: nextStats.lastDate, timeZone: zone }) : Promise.resolve([]),
+        productPreferences.getFocusMetrics(),
+      ]);
+      if (id !== request.current) return;
+      const available = history.map((summary) => summary.date).sort();
+      setStats(nextStats); setDates(available); setFocus(chosen);
+      const localToday = toLocalDate(new Date(), zone);
+      const target = selectedRef.current && available.includes(selectedRef.current) ? selectedRef.current : available.includes(localToday) ? localToday : available.at(-1);
+      if (target) await readDate(target, nextStats, id); else { selectedRef.current = localToday; setData(null); setDate(localToday); }
+      if (id === request.current) setError('');
+    } catch { if (id === request.current) setError(tr('error.openDay')); }
+    finally { if (id === request.current) { setLoading(false); setRefreshing(false); } }
+  }, [readDate]);
 
-  useEffect(() => { void Promise.resolve().then(initialize); }, [initialize]);
+  useFocusEffect(useCallback(() => { void initialize(); return () => { request.current += 1; }; }, [initialize]));
 
-  const refresh = useCallback(async () => {
-    if (!selectedDate) return;
-    setRefreshing(true);
-    setError('');
-    try {
-      const { dashboardService } = await appDependencies.getPersistence();
-      const nextStats = await dashboardService.refresh(selectedDate, stats?.sync?.range?.timeZone ?? getSystemTimeZone());
-      setStats(nextStats);
-      await readPersistedDay(selectedDate, nextStats);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Refresh failed.');
-      setPhase('error');
-    } finally {
-      setRefreshing(false);
-    }
-  }, [readPersistedDay, selectedDate, stats]);
+  const selectDate = async (next: LocalDate) => {
+    if (!stats) return;
+    const id = ++request.current;
+    setLoading(true); setRefreshing(false); setError('');
+    try { await readDate(next, stats, id); } catch { if (id === request.current) setError(tr('error.day')); }
+    finally { if (id === request.current) setLoading(false); }
+  };
 
-  const changeDate = useCallback(async (amount: number) => {
-    if (!selectedDate || !stats?.firstDate || !stats.lastDate) return;
-    const nextDate = moveDashboardDate(selectedDate, amount, stats.firstDate, stats.lastDate);
-    if (nextDate === selectedDate) return;
-    setPhase('initializing');
-    try {
-      await readPersistedDay(nextDate, stats);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'That day could not be loaded.');
-      setPhase('error');
-    }
-  }, [readPersistedDay, selectedDate, stats]);
-
-  const selectScenario = useCallback(async (nextScenario: DevelopmentScenarioId) => {
-    if (!__DEV__) return;
+  const refresh = async () => {
+    if (!date) return;
+    const id = ++request.current;
     setRefreshing(true);
     try {
       const { dashboardService } = await appDependencies.getPersistence();
-      const nextStats = await dashboardService.selectDevelopmentScenario(nextScenario);
-      const nextDevelopmentScenarios = dashboardService.getDevelopmentScenarios();
-      if (!nextStats.firstDate || !nextStats.lastDate || !nextStats.sync?.range) throw new Error('Scenario import produced no persisted date range.');
-      setDevelopmentScenarios(nextDevelopmentScenarios);
-      const localToday = toLocalDate(new Date(), nextStats.sync.range.timeZone);
-      const targetDate = localToday >= nextStats.firstDate && localToday <= nextStats.lastDate ? localToday : nextStats.lastDate;
-      setToday(localToday);
-      setStats(nextStats);
-      await readPersistedDay(targetDate, nextStats);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Scenario import failed.');
-      setPhase('error');
-    } finally {
-      setRefreshing(false);
-    }
-  }, [readPersistedDay]);
+      await dashboardService.refresh(date, timeZone);
+      if (id === request.current) await initialize(id);
+    } catch { if (id === request.current) setError(tr('error.sync')); }
+    finally { if (id === request.current) setRefreshing(false); }
+  };
 
-  const showLatest = useCallback(() => {
-    if (stats?.lastDate) void readPersistedDay(stats.lastDate, stats);
-  }, [readPersistedDay, stats]);
+  const saveFocus = async () => {
+    setSaving(true);
+    try { const { productPreferences } = await appDependencies.getPersistence(); await productPreferences.setFocusMetrics(draftFocus); setFocus(draftFocus); setSheet(null); }
+    catch { setError(tr('error.focus')); }
+    finally { setSaving(false); }
+  };
 
-  if (phase === 'initializing') {
-    return <ScreenShell theme={theme}><StatePanel loading title="Preparing your dashboard" message="Opening your private on-device health data." theme={theme} /></ScreenShell>;
-  }
-  if (phase === 'error') {
-    return <ScreenShell theme={theme}><StatePanel title="Dashboard unavailable" message={error || 'Something went wrong while reading local health data.'} actionLabel="Try again" onAction={() => { setPhase('initializing'); void initialize(); }} theme={theme} /></ScreenShell>;
-  }
-  if (phase === 'empty' || !summary || !selectedDate || !today) {
-    return (
-      <ScreenShell theme={theme}>
-        <StatePanel
-          title="No data for today"
-          message={getEmptyDashboardMessage(stats?.storedDays ?? 0)}
-          actionLabel={stats?.lastDate ? 'Show latest data' : canRefreshEmpty ? 'Sync now' : undefined}
-          onAction={stats?.lastDate ? showLatest : canRefreshEmpty ? () => void refresh() : undefined}
-          theme={theme}
-        />
-      </ScreenShell>
-    );
-  }
+  const summary = data?.day.summary;
+  const view = summary ? buildDashboardViewModel(summary, today, data?.day.baselines ?? undefined, data?.day.recovery ?? undefined, data?.day.insight ?? undefined) : null;
+  const index = date ? dates.indexOf(date) : -1;
+  const openMetric = (metric: FocusMetric | 'recovery') => router.push({ pathname: '/metric/[metric]', params: { metric, date: date ?? undefined } });
+  const display = (metric: FocusMetric): MetricDisplay | null => !view ? null : metric === 'hrv' ? view.hrv : metric === 'rhr' ? view.restingHeartRate : metric === 'spo2' ? view.oxygenSaturation : metric === 'stress' ? view.stress : metric === 'sleep' ? view.sleep : view.activity;
+  const sleep = summary?.sleep.status === 'available' ? summary.sleep.value : null;
+  const activity = summary?.activity.status === 'available' ? summary.activity.value : null;
+  const weekView = data ? buildTrendsViewModel(data.week) : null;
 
-  const viewModel = buildDashboardViewModel(summary, today, baselines ?? undefined, recovery ?? undefined, insight ?? undefined);
-  const syncText = formatSyncFreshness(stats?.sync ?? null, new Date());
-  const previousDisabled = !stats?.firstDate || selectedDate <= stats.firstDate;
-  const nextDisabled = !stats?.lastDate || selectedDate >= stats.lastDate;
+  return <SafeAreaView edges={['top', 'left', 'right']} style={styles.safeArea}>
+    <StatusBar style={theme.dark ? 'light' : 'dark'} />
+    <ScrollView contentContainerStyle={[styles.content, { paddingHorizontal: layout.compact ? 16 : 24 }]} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} tintColor={theme.colors.accent} colors={[theme.colors.accent]} />}>
+      <View style={styles.identity}>
+        <Pressable accessibilityRole="button" accessibilityLabel={tr('today.freshness')} onPress={() => setSheet('freshness')} style={({ pressed }) => [styles.brand, layout.enlargedText && { flexBasis: '100%' }, pressed && styles.pressed]}><BrandMark size={26} color={theme.colors.accent} secondary={theme.colors.accentStrong} /><View style={styles.brandCopy}><Text style={styles.brandName}>{tr('brand.short')}</Text><View style={styles.freshness}><View style={[styles.statusDot, { backgroundColor: error || stats?.sync?.status === 'failed' ? theme.colors.warning : theme.colors.accent }]} /><Text style={styles.freshnessText}>{compactFreshness(stats?.sync ?? null, new Date(), stats?.provider === 'mock')}</Text></View></View></Pressable>
+        <Pressable accessibilityLabel={tr('today.openWeek')} accessibilityRole="button" onPress={() => setSheet('week')} style={({ pressed }) => [styles.weekButton, pressed && styles.pressed]}><AppIcon name="trends" color={theme.colors.accent} size={16} /><Text style={styles.weekButtonText}>{tr('today.week')}</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={tr('today.customize')} onPress={() => { setDraftFocus(focus); setSheet('focus'); }} style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}><AppIcon name="settings" color={theme.colors.textSecondary} size={19} /></Pressable>
+      </View>
+      <DateNavigator previousLabel={tr('calendar.previousDay')} nextLabel={tr('calendar.nextDay')} previousDisabled={index <= 0 || loading} nextDisabled={index < 0 || index >= dates.length - 1 || loading} onPrevious={() => void selectDate(dates[index - 1])} onNext={() => void selectDate(dates[index + 1])} theme={theme}>
+        <Pressable accessibilityRole="button" accessibilityLabel={tr('format.openCalendar', { date: date ?? today })} onPress={() => setCalendar(true)} style={({ pressed }) => [styles.dateButton, pressed && styles.pressed]}><Text style={[styles.dateText, { textAlign: 'center' }]}>{formatSelectedDate(date ?? today, width, fontScale)}</Text><Text style={[styles.dateHint, { textAlign: 'center' }]}>{date === today ? tr('nav.today') : tr('common.history')} ⌄</Text></Pressable>
+      </DateNavigator>
 
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style={theme.dark ? 'light' : 'dark'} />
-      <ScrollView
-        contentContainerStyle={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} tintColor={theme.colors.accent} colors={[theme.colors.accent]} />}
-      >
-        <View style={styles.headerRow}>
-          <View>
-            <Text style={styles.brand}>HEALTH ANALYTICS</Text>
-            <Text style={styles.hero}>{viewModel.dateLabel}</Text>
-          </View>
-          <View style={styles.syncPill} accessibilityLabel={syncText}>
-            <View style={styles.syncDot} />
-            <Text style={styles.syncText}>{syncText}</Text>
-          </View>
+
+      {error ? <CompactState title={data ? tr('today.syncAttention') : tr('today.dataUnavailable')} message={error} icon="alert" action={tr('common.retry')} onAction={() => void (data ? refresh() : initialize())} theme={theme} /> : null}
+      {loading ? <CompactState loading title={tr('today.opening')} theme={theme} /> : null}
+      {!loading && !summary ? <CompactState title={tr('today.noReadings')} message={tr('today.syncHelp')} icon="trends" action={dates.length ? tr('today.openHistory') : appDependencies.healthProvider.id === 'huawei' ? tr('today.syncNow') : undefined} onAction={() => dates.length ? setCalendar(true) : void refresh()} theme={theme} /> : null}
+
+      {!loading && summary && view && data ? <Reveal identity={date ?? undefined}>
+        <TodayRecovery recovery={data.day.recovery} presentation={view.recovery} average={weekView?.cards[0].headline !== tr('common.noUsableData') ? weekView?.cards[0].headline : undefined} expanded={expanded} onExpand={() => setExpanded(!expanded)} onOpen={openMetric} theme={theme} />
+
+        {focus.length ? <View style={styles.focusSection}><Text style={styles.focusCaption}>{tr('today.focus')}</Text><View style={styles.focusGrid}>{focus.map((metric) => { const item = display(metric)!; return <Pressable key={metric} accessibilityRole="button" accessibilityLabel={`${getFocusMeta()[metric].full}, ${readingLabel(metric, item)}`} accessibilityHint={tr('today.focusShortcut')} onPress={() => openMetric(metric)} style={({ pressed }) => [styles.focusItem, pressed && styles.pressed]}><View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><Text style={[styles.focusLabel, { flex: 1 }]}>{getFocusMeta()[metric].label}</Text><Text style={{ color: theme.colors.textMuted }}>›</Text></View><Text style={styles.focusValue}>{readingLabel(metric, item)}</Text></Pressable>; })}</View></View> : null}
+
+        <View style={styles.sleepSection}><SectionLabel title={tr('today.night')} action={tr('metric.sleep')} onAction={() => openMetric('sleep')} theme={theme} />
+          {sleep ? <Pressable accessibilityRole="button" onPress={() => openMetric('sleep')} style={({ pressed }) => [styles.sleepModule, pressed && styles.pressed]}><View style={styles.sleepTop}><View style={styles.sleepIdentity}><AppIcon name="sleep" color={theme.colors.sleep} size={25} /><View style={{ flexShrink: 1, maxWidth: '100%' }}><Text style={styles.sleepDuration}>{view.sleep.value}</Text><Text style={styles.sleepTiming}>{view.sleep.detail ?? tr('today.noTiming')}</Text></View></View>{sleep.score !== undefined ? <View style={styles.sleepScore}><Text style={styles.sleepScoreValue}>{sleep.score}</Text><Text style={styles.sleepScoreCaption}>{tr('today.sleepScore')}</Text></View> : null}</View><SleepComposition sleep={sleep} theme={theme} compact /><Text style={styles.sleepBaseline}>{shortBaseline(data.day.baselines?.sleepDuration, true)}</Text></Pressable> : <CompactState icon="sleep" title={shortAvailability(view.sleep)} theme={theme} />}
         </View>
 
-        <View style={styles.dayNavigation}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Previous day" disabled={previousDisabled} onPress={() => void changeDate(-1)} style={({ pressed }) => [styles.dayButton, previousDisabled && styles.disabled, pressed && styles.pressed]}>
-            <Text style={styles.dayButtonText}>‹</Text>
-          </Pressable>
-          <Text style={styles.fullDate}>{formatFullDate(selectedDate)}</Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Next day" disabled={nextDisabled} onPress={() => void changeDate(1)} style={({ pressed }) => [styles.dayButton, nextDisabled && styles.disabled, pressed && styles.pressed]}>
-            <Text style={styles.dayButtonText}>›</Text>
-          </Pressable>
-        </View>
+        <View style={styles.vitalsSection}><SectionLabel title={tr('today.signals')} action={tr('today.allTrends')} onAction={() => router.push('/trends')} theme={theme} /><View style={styles.signalPanel}>{(['hrv', 'rhr', 'spo2', 'stress'] as FocusMetric[]).map((metric) => { const item = display(metric)!; const baseline = metric === 'hrv' ? data.day.baselines?.hrv : metric === 'rhr' ? data.day.baselines?.restingHeartRate : undefined; const points = readingPoints(metric, data.history, summary.date, summary.timeZone); return <Pressable key={metric} accessibilityRole="button" accessibilityLabel={`${getFocusMeta()[metric].full}, ${readingLabel(metric, item)}, ${baseline ? shortBaseline(baseline) : ''}`} onPress={() => openMetric(metric)} style={({ pressed }) => [styles.signalRow, item.status !== 'available' && styles.signalMissing, pressed && styles.pressed]}><AppIcon name={getFocusMeta()[metric].icon} color={item.status === 'available' ? theme.colors.accent : theme.colors.textMuted} size={20} /><View style={styles.signalIdentity}><Text style={styles.signalName}>{getFocusMeta()[metric].label}</Text>{baseline ? <Text style={styles.signalContext}>{shortBaseline(baseline)}</Text> : item.status === 'available' ? null : <Text style={styles.signalContext}>{shortAvailability(item)}</Text>}</View><View style={styles.signalValueGroup}><Text style={[styles.signalValue, item.status !== 'available' && styles.missingValue]}>{item.status === 'available' ? item.value : '—'}{item.status === 'available' && item.unit ? <Text style={styles.signalUnit}>{metric === 'hrv' ? ' ms' : ` ${item.unit}`}</Text> : null}</Text></View>{item.status === 'available' && !layout.enlargedText ? <Sparkline points={points} theme={theme} width={54} height={24} /> : null}<Text style={styles.signalChevron}>›</Text></Pressable>; })}</View></View>
 
-        <DashboardSection theme={theme}>
-          <View style={styles.recoveryCard}>
-            <View style={styles.recoveryTop}>
-              <Text style={styles.cardEyebrow}>RECOVERY</Text>
-              {viewModel.recovery.completeness ? <View style={styles.futurePill}><Text style={styles.futurePillText}>{viewModel.recovery.completeness}</Text></View> : null}
-            </View>
-            <Text style={styles.recoveryTitle}>{viewModel.recovery.title}</Text>
-            {viewModel.recovery.category ? <Text style={styles.recoveryCategory}>{viewModel.recovery.category}</Text> : null}
-            <Text style={styles.recoveryCopy}>{viewModel.recovery.detail}</Text>
-            {viewModel.recovery.details.length ? (
-              <>
-                <Pressable accessibilityRole="button" accessibilityState={{ expanded: showRecoveryDetails }} onPress={() => setShowRecoveryDetails((visible) => !visible)} style={({ pressed }) => [styles.recoveryDetailButton, pressed && styles.pressed]}>
-                  <Text style={styles.recoveryDetailButtonText}>{showRecoveryDetails ? 'Hide details' : 'Why this score?'}</Text>
-                </Pressable>
-                {showRecoveryDetails ? (
-                  <View style={styles.recoveryDetails}>
-                    {viewModel.recovery.details.map((item) => (
-                      <View key={item.signal} style={styles.recoverySignal}>
-                        <Text style={styles.recoverySignalTitle}>{item.signal}</Text>
-                        {item.current ? <Text style={styles.recoverySignalFact}>Current {item.current}</Text> : null}
-                        {item.baseline ? <Text style={styles.recoverySignalFact}>Baseline {item.baseline}</Text> : null}
-                        {item.typicalRange ? <Text style={styles.recoverySignalFact}>Typical {item.typicalRange}</Text> : null}
-                        {item.contribution ? <Text style={styles.recoveryContribution}>{item.contribution}</Text> : null}
-                        {item.weight ? <Text style={styles.recoverySignalMeta}>{item.weight}</Text> : null}
-                        <Text style={styles.recoverySignalMeta}>{item.reason}</Text>
-                      </View>
-                    ))}
-                  </View>
-                ) : null}
-              </>
-            ) : null}
-          </View>
-        </DashboardSection>
+        <View style={styles.activitySection}><SectionLabel title={tr('today.movement')} action={tr('metric.activity')} onAction={() => openMetric('activity')} theme={theme} />{activity ? <Pressable accessibilityRole="button" onPress={() => openMetric('activity')} style={({ pressed }) => [styles.activityModule, pressed && styles.pressed]}><View style={styles.movementTop}><View><Text style={styles.activityValue}>{formatNumber(activity.steps)}</Text><Text style={styles.activityCaption}>{'steps'}</Text></View><View style={styles.movementPlot}><MovementBars points={readingPoints('activity', data.history, summary.date, summary.timeZone)} theme={theme} height={84} selectedDate={summary.date} /></View></View><View style={styles.activityFacts}>{[{ value: activity.activeDurationMinutes === undefined ? '—' : `${activity.activeDurationMinutes} min`, label: tr('today.active') }, { value: activity.activeEnergyKcal === undefined ? '—' : `${formatNumber(activity.activeEnergyKcal)} kcal`, label: tr('today.energy') }, { value: activity.workoutCount === undefined ? '—' : String(activity.workoutCount), label: tr('today.workouts') }].map((item) => <View key={item.label} style={styles.activityFact}><Text style={styles.factValue}>{item.value}</Text><Text style={styles.factLabel}>{item.label}</Text></View>)}</View></Pressable> : <CompactState title={shortAvailability(view.activity)} icon="activity" theme={theme} />}</View>
 
-        <DashboardSection theme={theme}>
-          <View style={styles.insightCard}>
-            <Text style={styles.cardEyebrow}>TODAY&apos;S INSIGHT</Text>
-            <Text style={styles.insightTitle}>{viewModel.insight.title}</Text>
-            <Text style={styles.insightCopy}>{viewModel.insight.detail}</Text>
-          </View>
-        </DashboardSection>
+        <Pressable accessibilityRole="button" onPress={() => data.day.insight?.metric ? openMetric(data.day.insight.metric === 'recovery' ? 'recovery' : data.day.insight.metric === 'sleep-duration' ? 'sleep' : data.day.insight.metric === 'hrv-rmssd' ? 'hrv' : data.day.insight.metric === 'resting-heart-rate' ? 'rhr' : 'activity') : router.push('/insights')} style={({ pressed }) => [styles.pattern, pressed && styles.pressed]}><AppIcon name="insights" color={theme.colors.accent} size={23} /><View style={styles.patternCopy}><Text style={styles.kicker}>{tr('today.pattern')}</Text><Text style={styles.patternTitle}>{view.insight.available ? view.insight.title : tr('today.weekGlance')}</Text><Text style={styles.patternDetail}>{view.insight.available ? view.insight.detail : tr('today.weekContext')}</Text></View><Text style={styles.signalChevron}>›</Text></Pressable>
+      </Reveal> : null}
+    </ScrollView>
 
-        <DashboardSection theme={theme}>
-          <Text style={styles.sectionTitle}>Sleep</Text>
-          <View style={styles.sleepCard}>
-            <View>
-              <Text style={[styles.largeMetric, viewModel.sleep.status !== 'available' && styles.unavailable]}>{viewModel.sleep.value}</Text>
-              {viewModel.sleep.detail ? <Text style={styles.metricSupporting}>{viewModel.sleep.detail}</Text> : null}
-              {viewModel.sleep.comparison ? <Text style={styles.sleepComparison}>{viewModel.sleep.comparison}</Text> : null}
-              {viewModel.sleep.baselineDetail ? <Text style={styles.sleepBaseline}>{viewModel.sleep.baselineDetail}</Text> : null}
-            </View>
-            {viewModel.sleep.stages ? <Text style={styles.stageText}>{viewModel.sleep.stages}</Text> : null}
-          </View>
-        </DashboardSection>
-
-        <DashboardSection theme={theme}>
-          <Text style={styles.sectionTitle}>Vitals</Text>
-          <View style={styles.metricGrid}>
-            <MetricCard label="HRV" metric={viewModel.hrv} theme={theme} />
-            <MetricCard label="Resting heart rate" metric={viewModel.restingHeartRate} theme={theme} />
-            <MetricCard label="Oxygen saturation" metric={viewModel.oxygenSaturation} theme={theme} />
-            <MetricCard label="Stress" metric={viewModel.stress} theme={theme} />
-          </View>
-        </DashboardSection>
-
-        <DashboardSection theme={theme}>
-          <Text style={styles.sectionTitle}>Activity</Text>
-          <View style={styles.activityCard}>
-            <View style={styles.activityMetricRow}>
-              <Text style={[styles.largeMetric, viewModel.activity.status !== 'available' && styles.unavailable]}>{viewModel.activity.value}</Text>
-              {viewModel.activity.unit ? <Text style={styles.largeMetricUnit}>{viewModel.activity.unit}</Text> : null}
-            </View>
-            {viewModel.activity.facts.length ? (
-              <View style={styles.factRow}>{viewModel.activity.facts.map((fact) => <Text key={fact} style={styles.fact}>{fact}</Text>)}</View>
-            ) : null}
-          </View>
-        </DashboardSection>
-
-        {developmentScenarios ? (
-          <DashboardSection theme={theme}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Toggle development data scenarios" onPress={() => setShowDevelopmentData((visible) => !visible)} style={({ pressed }) => [styles.devToggle, pressed && styles.pressed]}>
-              <Text style={styles.devToggleText}>Development data</Text>
-              <Text style={styles.devToggleMeta}>{developmentScenarios.current} {showDevelopmentData ? '−' : '+'}</Text>
-            </Pressable>
-            {showDevelopmentData ? (
-              <View style={styles.devPanel}>
-                <Text style={styles.devHelp}>Selecting a scenario resets and reseeds only this development database.</Text>
-                <View style={styles.scenarioGrid}>
-                  {developmentScenarios.options.map((item) => (
-                    <Pressable key={item.id} disabled={refreshing} onPress={() => void selectScenario(item.id)} style={({ pressed }) => [styles.scenarioButton, developmentScenarios.current === item.id && styles.scenarioButtonSelected, pressed && styles.pressed]}>
-                      <Text style={[styles.scenarioText, developmentScenarios.current === item.id && styles.scenarioTextSelected]}>{item.label}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            ) : null}
-          </DashboardSection>
-        ) : null}
-
-        <Text style={styles.footer}>Wellness information only. No medical interpretation is applied.</Text>
-      </ScrollView>
-    </SafeAreaView>
-  );
+    {calendar ? <DateHistoryPicker visible selectedDate={date ?? today} today={today} availableDates={dates} onClose={() => setCalendar(false)} onSelect={(next) => { setCalendar(false); void selectDate(next); }} theme={theme} /> : null}
+    <ProductSheet visible={sheet === 'focus'} onClose={() => setSheet(null)} title={tr('today.customize')} subtitle={tr('today.customizeHelp')} theme={theme}>{FOCUS_METRICS.map((metric) => { const selected = draftFocus.includes(metric); return <Pressable key={metric} accessibilityRole="checkbox" accessibilityState={{ checked: selected, disabled: saving || (!selected && draftFocus.length >= MAX_FOCUS_METRICS) }} disabled={saving || (!selected && draftFocus.length >= MAX_FOCUS_METRICS)} onPress={() => setDraftFocus(selected ? draftFocus.filter((value) => value !== metric) : [...draftFocus, metric])} style={({ pressed }) => [styles.option, pressed && styles.pressed]}><AppIcon name={getFocusMeta()[metric].icon} color={selected ? theme.colors.accent : theme.colors.textSecondary} size={21} /><Text style={styles.optionLabel}>{getFocusMeta()[metric].full}</Text><Text style={styles.optionCheck}>{selected ? '✓' : '+'}</Text></Pressable>; })}<Pressable accessibilityRole="button" disabled={saving} onPress={() => void saveFocus()} style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]}><Text style={styles.saveText}>{saving ? tr('today.saving') : tr('today.save')}</Text></Pressable></ProductSheet>
+    <ProductSheet visible={sheet === 'week'} onClose={() => setSheet(null)} title={tr('today.week')} subtitle={data ? `${formatSelectedDate(data.week.startDate, 360, 1)} – ${formatSelectedDate(data.week.endDate, 360, 1)} · last seven days` : tr('today.weekHelp')} theme={theme}>{weekView ? <>{weekView.cards.map((item) => <Pressable accessibilityRole="button" key={item.metric} onPress={() => { setSheet(null); openMetric(item.metric === 'recovery' ? 'recovery' : item.metric === 'sleep-duration' ? 'sleep' : item.metric === 'hrv-rmssd' ? 'hrv' : item.metric === 'resting-heart-rate' ? 'rhr' : 'activity'); }} style={({ pressed }) => [styles.weekFact, pressed && styles.pressed]}><View style={{ flex: 1 }}><Text style={styles.weekLabel}>{item.label}</Text><Text style={styles.weekCoverage}>{item.coverage}</Text></View><View style={{ alignItems: 'flex-end', flex: 1 }}><Text style={styles.weekValue}>{item.headline}{item.unit && item.headline !== tr('common.noUsableData') ? ` ${item.unit}` : ''}</Text><Text style={styles.weekChange}>{item.comparison}</Text></View></Pressable>)}{data?.day.insight ? <View style={{ marginTop: 20 }}><Text style={styles.kicker}>{tr('today.strongest')}</Text><Text style={styles.patternTitle}>{data.day.insight.title}</Text><Text style={styles.reason}>{data.day.insight.explanation}</Text></View> : null}</> : <CompactState title={tr('today.weekNeedsData')} message={tr('today.weekAfterSync')} theme={theme} />}</ProductSheet>
+    <ProductSheet visible={sheet === 'freshness'} onClose={() => setSheet(null)} title={tr('today.data')} theme={theme}>
+      <Text style={styles.reason}>{tr('format.source', { source: appDependencies.healthProvider.id === 'mock' ? tr('state.mockSynthetic') : appDependencies.healthProvider.displayName })}</Text>
+      <Text style={styles.reason}>{formatSyncFreshness(stats?.sync ?? null, new Date())}</Text>
+      <Text style={styles.reason}>{stats?.sync?.lastSuccessfulAt ? tr('format.lastSync', { date: new Intl.DateTimeFormat(getLocale(), { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(stats.sync.lastSuccessfulAt)) }) : tr('state.notSynced')}</Text>
+      <Text style={styles.reason}>{tr('format.savedDays', { count: stats?.storedDays ?? 0 })}</Text>
+      <Text style={styles.reason}>{appDependencies.healthProvider.id === 'mock' ? tr('today.mockDisclosure') : tr('today.huaweiStepOnly')}</Text>
+      {stats?.sync?.error ? <Text style={styles.reason}>{tr('error.sync')}</Text> : null}
+      <Text style={styles.reason}>{tr(refreshing || stats?.sync?.status === 'running' ? 'today.refreshBusy' : date ? 'today.refreshAvailable' : 'today.refreshUnavailable')}</Text>
+      <Pressable accessibilityRole="button" accessibilityState={{ disabled: !date || refreshing || stats?.sync?.status === 'running' }} disabled={!date || refreshing || stats?.sync?.status === 'running'} onPress={() => void refresh()} style={({ pressed }) => [styles.saveButton, { opacity: !date || refreshing || stats?.sync?.status === 'running' ? 0.45 : pressed ? 0.65 : 1 }]}><Text style={styles.saveText}>{refreshing ? tr('state.refreshing') : tr('today.syncNow')}</Text></Pressable>
+    </ProductSheet>
+  </SafeAreaView>;
 }
 
-function ScreenShell({ children, theme }: { children: React.ReactNode; theme: AppTheme }) {
-  return (
-    <SafeAreaView style={[shellStyles.safeArea, { backgroundColor: theme.colors.background }]}>
-      <StatusBar style={theme.dark ? 'light' : 'dark'} />
-      {children}
-    </SafeAreaView>
-  );
-}
+function readingLabel(metric: FocusMetric, item: MetricDisplay) { return item.status === 'available' ? `${item.value}${metric === 'hrv' ? ' ms' : item.unit ? ` ${item.unit}` : ''}` : shortAvailability(item); }
 
-function formatFullDate(date: LocalDate): string {
-  return new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date(`${date}T12:00:00Z`));
-}
+function shortAvailability(metric: MetricDisplay) { return metric.status === 'unsupported' ? tr('common.unavailable') : metric.status === 'query-failed' ? tr('common.readingFailed') : tr('common.noReading'); }
 
-const shellStyles = StyleSheet.create({ safeArea: { flex: 1 } });
+function createStyles(theme: AppTheme, stacked: boolean) { return StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: theme.colors.background }, content: { alignSelf: 'center', maxWidth: 720, width: '100%', paddingTop: 12, paddingBottom: 32 },
+  identity: { flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 8 }, brand: { alignItems: 'center', flexGrow: 1, flexShrink: 1, minWidth: 120, minHeight: 48, flexDirection: 'row', gap: 8 }, brandCopy: { flex: 1, minWidth: 0 }, brandName: { color: theme.colors.text, fontSize: 16, fontWeight: '700', letterSpacing: -0.3 }, freshness: { alignItems: 'center', flexDirection: 'row', gap: 5, marginTop: 4 }, statusDot: { borderRadius: 3, width: 5, height: 5 }, freshnessText: { color: theme.colors.textMuted, fontSize: 10, flexShrink: 1 }, iconButton: { alignItems: 'center', justifyContent: 'center', minHeight: 48, minWidth: 48, backgroundColor: theme.colors.surface, borderRadius: 16 },
+  dateButton: { justifyContent: 'center', minHeight: 48, alignItems: 'center' }, dateText: { color: theme.colors.text, fontSize: 17, fontWeight: '600' }, dateHint: { color: theme.colors.textMuted, fontSize: 10, marginTop: 2 }, weekButton: { flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.colors.accentSoft, borderRadius: 14, minHeight: 48, paddingHorizontal: 10 }, weekButtonText: { color: theme.colors.accent, fontSize: 11, fontWeight: '700' },
+  kicker: { color: theme.colors.textMuted, fontSize: 11, fontWeight: '600', letterSpacing: 0.1 }, whyAction: { color: theme.colors.accent, fontSize: 11, fontWeight: '600' }, reason: { color: theme.colors.textSecondary, fontSize: 13, lineHeight: 20, marginBottom: 12 },
 
-function createStyles(theme: AppTheme) {
-  return StyleSheet.create({
-    safeArea: { backgroundColor: theme.colors.background, flex: 1 },
-    content: { paddingBottom: 56, paddingHorizontal: theme.spacing.lg, paddingTop: theme.spacing.xl },
-    headerRow: { alignItems: 'flex-start', flexDirection: 'row', gap: theme.spacing.md, justifyContent: 'space-between' },
-    brand: { color: theme.colors.accent, fontSize: theme.typography.eyebrow, fontWeight: '800', letterSpacing: 1.7 },
-    hero: { color: theme.colors.text, fontSize: theme.typography.hero, fontWeight: '700', letterSpacing: -1.2, marginTop: theme.spacing.xs },
-    syncPill: { alignItems: 'center', backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.pill, borderWidth: 1, flexDirection: 'row', gap: 7, maxWidth: 155, minHeight: 36, paddingHorizontal: theme.spacing.md },
-    syncDot: { backgroundColor: theme.colors.accent, borderRadius: 4, height: 7, width: 7 },
-    syncText: { color: theme.colors.textSecondary, flexShrink: 1, fontSize: 11, fontWeight: '600' },
-    dayNavigation: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginTop: theme.spacing.xl },
-    dayButton: { alignItems: 'center', backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: 22, borderWidth: 1, height: 44, justifyContent: 'center', width: 44 },
-    dayButtonText: { color: theme.colors.text, fontSize: 28, lineHeight: 30 },
-    fullDate: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, fontWeight: '600' },
-    disabled: { opacity: 0.3 },
-    pressed: { opacity: 0.72 },
-    cardEyebrow: { color: theme.colors.accent, fontSize: theme.typography.eyebrow, fontWeight: '800', letterSpacing: 1.4 },
-    recoveryCard: { backgroundColor: theme.colors.surfaceRaised, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, overflow: 'hidden', padding: theme.spacing.xl },
-    recoveryTop: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-    futurePill: { backgroundColor: theme.colors.accentSoft, borderRadius: theme.radii.pill, paddingHorizontal: 10, paddingVertical: 6 },
-    futurePillText: { color: theme.colors.accent, fontSize: 10, fontWeight: '800', letterSpacing: 0.8 },
-    recoveryTitle: { color: theme.colors.text, fontSize: 23, fontWeight: '700', letterSpacing: -0.4, lineHeight: 29, marginTop: theme.spacing.xl, maxWidth: 330 },
-    recoveryCategory: { color: theme.colors.accent, fontSize: 15, fontWeight: '800', marginTop: theme.spacing.xs },
-    recoveryCopy: { color: theme.colors.textSecondary, fontSize: theme.typography.body, lineHeight: 22, marginTop: theme.spacing.sm, maxWidth: 340 },
-    recoveryDetailButton: { alignSelf: 'flex-start', borderColor: theme.colors.border, borderRadius: theme.radii.pill, borderWidth: 1, justifyContent: 'center', marginTop: theme.spacing.lg, minHeight: 44, paddingHorizontal: theme.spacing.lg },
-    recoveryDetailButtonText: { color: theme.colors.accent, fontSize: 13, fontWeight: '800' },
-    recoveryDetails: { gap: theme.spacing.sm, marginTop: theme.spacing.lg },
-    recoverySignal: { backgroundColor: theme.colors.surfaceMuted, borderRadius: theme.radii.md, padding: theme.spacing.md },
-    recoverySignalTitle: { color: theme.colors.text, fontSize: 14, fontWeight: '800' },
-    recoverySignalFact: { color: theme.colors.textSecondary, fontSize: 12, marginTop: 4 },
-    recoveryContribution: { color: theme.colors.accent, fontSize: 12, fontWeight: '800', marginTop: theme.spacing.sm },
-    recoverySignalMeta: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 16, marginTop: 3 },
-    insightCard: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, padding: theme.spacing.xl },
-    insightTitle: { color: theme.colors.text, fontSize: 18, fontWeight: '700', lineHeight: 24, marginTop: theme.spacing.lg },
-    insightCopy: { color: theme.colors.textSecondary, fontSize: 13, lineHeight: 20, marginTop: theme.spacing.sm },
-    sectionTitle: { color: theme.colors.text, fontSize: 19, fontWeight: '700', letterSpacing: -0.25, marginBottom: theme.spacing.md },
-    sleepCard: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, gap: theme.spacing.xl, padding: theme.spacing.xl },
-    largeMetric: { color: theme.colors.text, fontSize: 34, fontWeight: '700', letterSpacing: -0.8 },
-    largeMetricUnit: { color: theme.colors.textSecondary, fontSize: theme.typography.body, fontWeight: '600', marginBottom: 5 },
-    unavailable: { color: theme.colors.textSecondary, fontSize: 19, letterSpacing: 0 },
-    metricSupporting: { color: theme.colors.textSecondary, fontSize: theme.typography.body, marginTop: theme.spacing.xs },
-    sleepComparison: { color: theme.colors.accent, fontSize: 13, fontWeight: '700', lineHeight: 19, marginTop: theme.spacing.md },
-    sleepBaseline: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 16, marginTop: theme.spacing.xs },
-    stageText: { backgroundColor: theme.colors.surfaceMuted, borderRadius: theme.radii.md, color: theme.colors.textSecondary, fontSize: theme.typography.caption, lineHeight: 20, overflow: 'hidden', paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm },
-    metricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.md },
-    activityCard: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.lg, borderWidth: 1, padding: theme.spacing.xl },
-    activityMetricRow: { alignItems: 'flex-end', flexDirection: 'row', gap: theme.spacing.sm },
-    factRow: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.sm, marginTop: theme.spacing.xl },
-    fact: { backgroundColor: theme.colors.surfaceMuted, borderRadius: theme.radii.pill, color: theme.colors.textSecondary, fontSize: theme.typography.caption, overflow: 'hidden', paddingHorizontal: theme.spacing.md, paddingVertical: 8 },
-    devToggle: { alignItems: 'center', borderColor: theme.colors.border, borderRadius: theme.radii.md, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 48, paddingHorizontal: theme.spacing.lg },
-    devToggleText: { color: theme.colors.textSecondary, fontSize: theme.typography.caption, fontWeight: '700' },
-    devToggleMeta: { color: theme.colors.textMuted, fontSize: 11, textTransform: 'capitalize' },
-    devPanel: { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.md, borderTopWidth: 0, borderWidth: 1, marginTop: -1, padding: theme.spacing.lg },
-    devHelp: { color: theme.colors.textMuted, fontSize: 12, lineHeight: 18 },
-    scenarioGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing.sm, marginTop: theme.spacing.md },
-    scenarioButton: { borderColor: theme.colors.border, borderRadius: theme.radii.pill, borderWidth: 1, minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.spacing.md },
-    scenarioButtonSelected: { backgroundColor: theme.colors.accentSoft, borderColor: theme.colors.accentStrong },
-    scenarioText: { color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' },
-    scenarioTextSelected: { color: theme.colors.accent, fontWeight: '800' },
-    footer: { color: theme.colors.textMuted, fontSize: 11, lineHeight: 17, marginTop: theme.spacing.xxl, textAlign: 'center' },
-  });
-}
+  focusSection: { marginTop: 14 }, focusCaption: { color: theme.colors.textMuted, fontSize: 11, marginBottom: 8, fontWeight: '600' }, focusGrid: { backgroundColor: theme.colors.surfaceMuted, borderRadius: 16, padding: 4, flexDirection: stacked ? 'column' : 'row', flexWrap: 'wrap', gap: 4 }, focusItem: { padding: 10, minHeight: 48, flex: stacked ? undefined : 1, minWidth: 118, borderRadius: 12 }, focusLabel: { color: theme.colors.textSecondary, fontSize: 10 }, focusValue: { color: theme.colors.text, fontSize: 16, fontWeight: '600', marginTop: 4, fontVariant: ['tabular-nums'] },
+  sleepSection: { marginTop: 16 }, sleepModule: { backgroundColor: theme.colors.surface, borderRadius: 18, padding: 16 }, sleepTop: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between' }, sleepIdentity: { flexShrink: 1, minWidth: 0, flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 10 }, sleepDuration: { direction: 'ltr', writingDirection: 'ltr', color: theme.colors.text, fontSize: 32, fontWeight: '500', letterSpacing: -1 }, sleepTiming: { color: theme.colors.textSecondary, fontSize: 11, marginTop: 4 }, sleepScore: { alignItems: 'flex-end', borderStartColor: theme.colors.border, borderStartWidth: StyleSheet.hairlineWidth, paddingStart: 12 }, sleepScoreValue: { color: theme.colors.sleep, fontSize: 24, fontWeight: '600', fontVariant: ['tabular-nums'] }, sleepScoreCaption: { color: theme.colors.textMuted, fontSize: 10 }, sleepBaseline: { color: theme.colors.sleep, fontSize: 11, marginTop: 12 },
+  vitalsSection: { marginTop: 18 }, signalPanel: { backgroundColor: theme.colors.surface, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 4 }, signalRow: { alignItems: 'center', borderBottomColor: theme.colors.border, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', gap: 8, minHeight: 66, paddingVertical: 10, flexWrap: stacked ? 'wrap' : undefined }, signalMissing: { minHeight: 48, borderBottomWidth: 0 }, signalIdentity: { flex: 1, minWidth: 60 }, signalName: { color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' }, signalContext: { color: theme.colors.textMuted, fontSize: 10, lineHeight: 16, marginTop: 3 }, signalValueGroup: { direction: 'ltr', alignItems: 'flex-end', maxWidth: '100%' }, signalValue: { direction: 'ltr', writingDirection: 'ltr', color: theme.colors.text, fontSize: 21, fontWeight: '600', fontVariant: ['tabular-nums'] }, signalUnit: { color: theme.colors.textSecondary, fontSize: 11 }, missingValue: { color: theme.colors.textMuted, fontSize: 17 }, signalChevron: { color: theme.colors.textMuted, fontSize: 19 },
+  activitySection: { marginTop: 18 }, activityModule: { paddingVertical: 4 }, movementTop: { flexDirection: 'row', gap: 16, alignItems: 'center', flexWrap: 'wrap' }, activityValue: { color: theme.colors.text, fontSize: 38, fontWeight: '500', letterSpacing: -1.5 }, activityCaption: { color: theme.colors.activity, fontSize: 12, marginTop: 3 }, movementPlot: { flex: 1, minWidth: 128 }, activityFacts: { flexDirection: 'row', flexWrap: 'wrap', borderTopColor: theme.colors.border, borderTopWidth: StyleSheet.hairlineWidth, marginTop: 14, paddingTop: 12, gap: 12 }, activityFact: { flex: stacked ? undefined : 1, minWidth: stacked ? '100%' : 80 }, factValue: { color: theme.colors.text, fontSize: 16, fontWeight: '500' }, factLabel: { color: theme.colors.textMuted, fontSize: 10, marginTop: 4 },
+  pattern: { borderStartColor: theme.colors.accentMuted, borderStartWidth: 3, marginTop: 28, paddingVertical: 6, paddingStart: 16, flexDirection: 'row', alignItems: 'flex-start', gap: 12 }, patternCopy: { flex: 1 }, patternTitle: { color: theme.colors.text, fontSize: 20, fontWeight: '600', lineHeight: 27, marginTop: 6 }, patternDetail: { color: theme.colors.textSecondary, fontSize: 12, lineHeight: 19, marginTop: 7 },
+  option: { alignItems: 'center', borderBottomColor: theme.colors.border, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', minHeight: 60, gap: 12 }, optionLabel: { color: theme.colors.text, fontSize: 14, flex: 1 }, optionCheck: { color: theme.colors.accent, fontSize: 20 }, saveButton: { alignItems: 'center', backgroundColor: theme.colors.accentStrong, borderRadius: 14, justifyContent: 'center', minHeight: 52, marginTop: 20 }, saveText: { color: theme.colors.onAccent, fontSize: 14, fontWeight: '700' }, weekFact: { flexWrap: 'wrap', borderBottomColor: theme.colors.border, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: stacked ? 'column' : 'row', gap: 16, paddingVertical: 14 }, weekLabel: { color: theme.colors.textSecondary, fontSize: 13 }, weekCoverage: { color: theme.colors.textMuted, fontSize: 10, marginTop: 4 }, weekValue: { color: theme.colors.text, fontSize: 16, fontWeight: '600', textAlign: 'right' }, weekChange: { color: theme.colors.textSecondary, fontSize: 10, lineHeight: 15, marginTop: 4, textAlign: 'right' },
+  pressed: { opacity: 0.6 }, disabled: { opacity: 0.25 },
+}); }

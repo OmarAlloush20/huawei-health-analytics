@@ -1,35 +1,40 @@
+import { tr } from '../localization/i18n';
 import { Tabs } from 'expo-router';
-import { useMemo } from 'react';
-import { Text, useColorScheme, type ColorValue } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { createTheme } from '../theme/theme';
+import { AppThemeProvider, useAppTheme } from '../theme/ThemeContext';
 import { configureForegroundNotificationPresentation } from '../notifications/ExpoNotificationAdapter';
 import { useNotificationRouting } from '../notifications/useNotificationRouting';
+import { ProductTabBar } from '../components/ProductTabBar';
+import { LanguageProvider } from '../localization/LanguageContext';
 
 configureForegroundNotificationPresentation();
 
-const tabIcon = (label: string, color: ColorValue) => <Text style={{ color, fontSize: 13, fontWeight: '800' }}>{label}</Text>;
-
 export default function RootLayout() {
   useNotificationRouting();
-  const systemScheme = useColorScheme();
-  const theme = useMemo(() => createTheme(systemScheme !== 'light'), [systemScheme]);
   return (
     <SafeAreaProvider>
-      <Tabs screenOptions={{
+      <LanguageProvider><AppThemeProvider><ThemedTabs /></AppThemeProvider></LanguageProvider>
+    </SafeAreaProvider>
+  );
+}
+function ThemedTabs() {
+  const { theme } = useAppTheme();
+  return (
+      <Tabs tabBar={(props) => <ProductTabBar {...props} />} screenOptions={{
         headerShown: false,
         sceneStyle: { backgroundColor: theme.colors.background },
         tabBarActiveTintColor: theme.colors.accent,
         tabBarInactiveTintColor: theme.colors.textMuted,
-        tabBarStyle: { backgroundColor: theme.colors.surface, borderTopColor: theme.colors.border, height: 68, paddingBottom: 8, paddingTop: 7 },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '700' },
+        tabBarItemStyle: { minHeight: theme.layout.minimumTouchTarget },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: '700', letterSpacing: 0.1 },
       }}>
-        <Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: ({ color }) => tabIcon('H', color) }} />
-        <Tabs.Screen name="trends" options={{ title: 'Trends', tabBarIcon: ({ color }) => tabIcon('T', color) }} />
-        <Tabs.Screen name="insights" options={{ title: 'Insights', tabBarIcon: ({ color }) => tabIcon('I', color) }} />
-        <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: ({ color }) => tabIcon('S', color) }} />
+        <Tabs.Screen name="index" options={{ title: tr('nav.today') }} />
+        <Tabs.Screen name="trends" options={{ title: tr('nav.trends') }} />
+        <Tabs.Screen name="insights" options={{ title: tr('nav.insights') }} />
+        <Tabs.Screen name="settings" options={{ title: tr('nav.settings') }} />
+        <Tabs.Screen name="metric/[metric]" options={{ href: null, tabBarStyle: { display: 'none' } }} />
+        <Tabs.Screen name="developer-tools" options={{ href: null, tabBarStyle: { display: 'none' } }} />
       </Tabs>
-    </SafeAreaProvider>
   );
 }

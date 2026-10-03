@@ -11,12 +11,12 @@ export type MockHealthScenarioId = 'balanced' | 'poor-sleep' | 'low-hrv-elevated
 export interface MockHealthScenario { id: MockHealthScenarioId; label: string; description: string; historyDays: number }
 
 export const MOCK_HEALTH_SCENARIOS: readonly MockHealthScenario[] = [
-  { id: 'balanced', label: 'Balanced', description: 'Stable sleep, recovery signals, and moderate activity.', historyDays: 90 },
-  { id: 'poor-sleep', label: 'Poor Sleep', description: 'Several recent short and interrupted nights.', historyDays: 90 },
-  { id: 'low-hrv-elevated-rhr', label: 'Low HRV + High RHR', description: 'Recent depressed HRV with elevated resting heart rate.', historyDays: 90 },
-  { id: 'high-activity', label: 'High Activity', description: 'A recent block of workouts and high step volume.', historyDays: 90 },
-  { id: 'insufficient-history', label: 'Insufficient History', description: 'Only seven days are available for baseline testing.', historyDays: 7 },
-  { id: 'missing-data', label: 'Missing Data', description: 'Intentional gaps, unsupported data, and one query failure.', historyDays: 90 },
+  { id: 'balanced', label: 'Balanced', description: '90 stable days: typical sleep and recovery inputs, moderate activity, complete UI.', historyDays: 90 },
+  { id: 'poor-sleep', label: 'Poor Sleep', description: '90 days with a recent week of shorter, later, more interrupted sleep and higher stress.', historyDays: 90 },
+  { id: 'low-hrv-elevated-rhr', label: 'Low HRV + High RHR', description: '90 days with a recent HRV drop, higher resting heart rate, and higher stress.', historyDays: 90 },
+  { id: 'high-activity', label: 'High Activity', description: '90 days with a recent high-step, high-active-minute workout block.', historyDays: 90 },
+  { id: 'insufficient-history', label: 'Insufficient History', description: 'Seven recorded days: exercises baseline-learning and unavailable Recovery states.', historyDays: 7 },
+  { id: 'missing-data', label: 'Missing Data', description: '90 days with recent sleep, HRV, SpO₂, and Stress gaps plus one heart-rate query failure.', historyDays: 90 },
 ] as const;
 
 interface GeneratedMockData { summaries: DailyHealthSummary[]; sleepSessions: SleepSession[]; heartRateSamples: HeartRateSample[]; hrvObservations: HrvObservation[]; oxygenSaturationSamples: OxygenSaturationSample[]; workouts: WorkoutSession[] }
